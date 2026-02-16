@@ -3,7 +3,6 @@
 const std = @import("std");
 const Octet = @import("../math/octet.zig").Octet;
 const OctetMatrix = @import("octet_matrix.zig").OctetMatrix;
-const SparseBinaryMatrix = @import("sparse_matrix.zig").SparseBinaryMatrix;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const rng = @import("../math/rng.zig");
 const helpers = @import("../util/helpers.zig");
@@ -54,8 +53,7 @@ pub fn generateLDPC(matrix: *OctetMatrix, k_prime: u32, s: u32) void {
     const b = w - s;
     const p = k_prime + s + si.h - w;
 
-    // Sub-part 1: LDPC circulant (B columns, S rows)
-    // For i = 0..B-1: set 3 positions per column
+    // LDPC circulant
     var i: u32 = 0;
     while (i < b) : (i += 1) {
         const a_val: u32 = 1 + (i / s) % (s - 1);
@@ -66,14 +64,13 @@ pub fn generateLDPC(matrix: *OctetMatrix, k_prime: u32, s: u32) void {
         matrix.set((b_val + 2 * a_val) % s, i, Octet.ONE);
     }
 
-    // Sub-part 2: S x S identity at columns B..B+S-1
+    // S x S identity
     i = 0;
     while (i < s) : (i += 1) {
         matrix.set(i, b + i, Octet.ONE);
     }
 
-    // Sub-part 3: PI circulant in LDPC section
-    // For i = 0..S-1: two entries per row at columns W + (i%P) and W + ((i+1)%P)
+    // PI circulant
     i = 0;
     while (i < s) : (i += 1) {
         matrix.set(i, w + (i % p), Octet.ONE);
@@ -86,10 +83,6 @@ pub fn generateLDPC(matrix: *OctetMatrix, k_prime: u32, s: u32) void {
 pub fn generateHDPC(allocator: std.mem.Allocator, matrix: *OctetMatrix, k_prime: u32, s: u32, h: u32) !void {
     const kp_s = k_prime + s;
 
-    // Build MT: H x (K'+S) matrix
-    // MT[rand(j+1,6,H)][j] = 1 for j=0..K'+S-2
-    // MT[(rand(j+1,6,H)+rand(j+1,7,H-1)+1)%H][j] = 1 for j=0..K'+S-2
-    // Last column (j=K'+S-1): MT[i][K'+S-1] = alpha^i for i=0..H-1
     var mt = try OctetMatrix.init(allocator, h, kp_s);
     defer mt.deinit();
 
@@ -100,7 +93,6 @@ pub fn generateHDPC(allocator: std.mem.Allocator, matrix: *OctetMatrix, k_prime:
         mt.set(r1, j, Octet.ONE);
         mt.set(r2, j, Octet.ONE);
     }
-    // Last column: MT[i][K'+S-1] = alpha^i
     {
         var alpha_pow = Octet.ONE;
         var i: u32 = 0;
@@ -110,26 +102,15 @@ pub fn generateHDPC(allocator: std.mem.Allocator, matrix: *OctetMatrix, k_prime:
         }
     }
 
-    // Compute result = MT * GAMMA using right-to-left recurrence.
-    // GAMMA is (K'+S) x (K'+S) upper-triangular where GAMMA[i][j] = alpha^(i-j) for j>=i.
-    // R[r][c] = sum over k of MT[r][k] * GAMMA[k][c]
-    // Using recurrence: for each row r and column c (right to left):
+    // MT * GAMMA via right-to-left recurrence:
     //   result[r][c] = MT[r][c] + alpha * result[r][c+1]
-    // This works because GAMMA[c][c]=1 and GAMMA[k][c] = alpha * GAMMA[k][c+1] for k<=c.
-
-    // Process column by column from right to left
-    // Start from column kp_s-1 where result[r][kp_s-1] = MT[r][kp_s-1]
-    // Then for c = kp_s-2 downto 0: result[r][c] = MT[r][c] + alpha * result[r][c+1]
-
-    // We write directly into the constraint matrix rows S..S+H-1, columns 0..K'+S-1
+    // Exploits GAMMA[k][c] = alpha * GAMMA[k][c+1] for upper-triangular Vandermonde.
     {
-        // Initialize last column
         var r: u32 = 0;
         while (r < h) : (r += 1) {
             matrix.set(s + r, kp_s - 1, mt.get(r, kp_s - 1));
         }
 
-        // Right-to-left recurrence
         if (kp_s >= 2) {
             var c_iter: u32 = kp_s - 1;
             while (c_iter > 0) {
@@ -145,7 +126,6 @@ pub fn generateHDPC(allocator: std.mem.Allocator, matrix: *OctetMatrix, k_prime:
         }
     }
 
-    // HDPC identity block: H x H identity at columns K'+S..K'+S+H-1
     {
         var i: u32 = 0;
         while (i < h) : (i += 1) {
@@ -154,82 +134,58 @@ pub fn generateHDPC(allocator: std.mem.Allocator, matrix: *OctetMatrix, k_prime:
     }
 }
 
-/// Generate LT rows (encoding relationships) in the constraint matrix.
-/// Fills rows S+H..S+H+num_symbols-1 (i.e., the last K' rows for source symbols).
+/// Generate LT rows for sequential ISIs 0..num_symbols-1.
+/// Fills rows S+H..S+H+num_symbols-1.
 pub fn generateLT(matrix: *OctetMatrix, k_prime: u32, s: u32, h: u32, num_symbols: u32) void {
-    const si = systematic_constants.findSystematicIndex(k_prime).?;
-    const w = si.w;
-    const l = k_prime + s + h;
-    const p = l - w;
-    const p1 = helpers.nextPrime(p);
-
+    const params = ltParams(k_prime, s, h);
     var x: u32 = 0;
     while (x < num_symbols) : (x += 1) {
-        const tuple = rng.genTuple(k_prime, x);
-        const row = s + h + x;
-
-        // LT part: d entries in columns [0..W)
-        var b_val = tuple.b;
-        matrix.set(row, b_val, Octet.ONE);
-        var j: u32 = 1;
-        while (j < tuple.d) : (j += 1) {
-            b_val = (b_val + tuple.a) % w;
-            matrix.set(row, b_val, Octet.ONE);
-        }
-
-        // PI part: d1 entries in columns [W..W+P)
-        var b1 = tuple.b1;
-        while (b1 >= p) {
-            b1 = (b1 + tuple.a1) % p1;
-        }
-        matrix.set(row, w + b1, Octet.ONE);
-        j = 1;
-        while (j < tuple.d1) : (j += 1) {
-            b1 = (b1 + tuple.a1) % p1;
-            while (b1 >= p) {
-                b1 = (b1 + tuple.a1) % p1;
-            }
-            matrix.set(row, w + b1, Octet.ONE);
-        }
+        writeLTRow(matrix, k_prime, s + h + x, x, params);
     }
 }
 
 /// Generate LT rows for arbitrary ISIs (used by decoder).
-/// Fills rows S+H..S+H+isis.len-1, using isis[i] as the ISI for row i.
+/// Fills rows S+H..S+H+isis.len-1.
 pub fn generateLTRows(matrix: *OctetMatrix, k_prime: u32, s: u32, h: u32, isis: []const u32) void {
-    const si = systematic_constants.findSystematicIndex(k_prime).?;
-    const w = si.w;
-    const l = k_prime + s + h;
-    const p = l - w;
-    const p1 = helpers.nextPrime(p);
-
+    const params = ltParams(k_prime, s, h);
     for (isis, 0..) |isi, x| {
-        const tuple = rng.genTuple(k_prime, isi);
-        const row: u32 = s + h + @as(u32, @intCast(x));
+        writeLTRow(matrix, k_prime, s + h + @as(u32, @intCast(x)), isi, params);
+    }
+}
 
-        // LT part: d entries in columns [0..W)
-        var b_val = tuple.b;
+const LTParams = struct { w: u32, p: u32, p1: u32 };
+
+fn ltParams(k_prime: u32, s: u32, h: u32) LTParams {
+    const w = systematic_constants.findSystematicIndex(k_prime).?.w;
+    const p = k_prime + s + h - w;
+    return .{ .w = w, .p = p, .p1 = helpers.nextPrime(p) };
+}
+
+/// Write one LT+PI row into the matrix at the given row index.
+fn writeLTRow(matrix: *OctetMatrix, k_prime: u32, row: u32, isi: u32, params: LTParams) void {
+    const tuple = rng.genTuple(k_prime, isi);
+    const w = params.w;
+    const p = params.p;
+    const p1 = params.p1;
+
+    // LT component
+    var b_val = tuple.b;
+    matrix.set(row, b_val, Octet.ONE);
+    var j: u32 = 1;
+    while (j < tuple.d) : (j += 1) {
+        b_val = (b_val + tuple.a) % w;
         matrix.set(row, b_val, Octet.ONE);
-        var j: u32 = 1;
-        while (j < tuple.d) : (j += 1) {
-            b_val = (b_val + tuple.a) % w;
-            matrix.set(row, b_val, Octet.ONE);
-        }
+    }
 
-        // PI part: d1 entries in columns [W..W+P)
-        var b1 = tuple.b1;
-        while (b1 >= p) {
-            b1 = (b1 + tuple.a1) % p1;
-        }
+    // PI component
+    var b1 = tuple.b1;
+    while (b1 >= p) b1 = (b1 + tuple.a1) % p1;
+    matrix.set(row, w + b1, Octet.ONE);
+    j = 1;
+    while (j < tuple.d1) : (j += 1) {
+        b1 = (b1 + tuple.a1) % p1;
+        while (b1 >= p) b1 = (b1 + tuple.a1) % p1;
         matrix.set(row, w + b1, Octet.ONE);
-        j = 1;
-        while (j < tuple.d1) : (j += 1) {
-            b1 = (b1 + tuple.a1) % p1;
-            while (b1 >= p) {
-                b1 = (b1 + tuple.a1) % p1;
-            }
-            matrix.set(row, w + b1, Octet.ONE);
-        }
     }
 }
 

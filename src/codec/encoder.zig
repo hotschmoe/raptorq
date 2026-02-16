@@ -20,11 +20,10 @@ pub fn ltEncode(allocator: std.mem.Allocator, k_prime: u32, intermediate_symbols
 
     const tuple = rng.genTuple(k_prime, isi);
 
-    // Start with C[b]
     var result = try Symbol.fromSlice(allocator, intermediate_symbols[tuple.b].data);
     errdefer result.deinit();
 
-    // LT part: XOR d-1 more symbols from columns [0..W)
+    // LT component
     var b_val = tuple.b;
     var j: u32 = 1;
     while (j < tuple.d) : (j += 1) {
@@ -32,7 +31,7 @@ pub fn ltEncode(allocator: std.mem.Allocator, k_prime: u32, intermediate_symbols
         result.addAssign(intermediate_symbols[b_val]);
     }
 
-    // PI part: XOR d1 symbols from columns [W..W+P)
+    // PI component
     var b1 = tuple.b1;
     while (b1 >= p) {
         b1 = (b1 + tuple.a1) % p1;
@@ -65,16 +64,15 @@ pub const SourceBlockEncoder = struct {
         symbol_size: u16,
         data: []const u8,
     ) !SourceBlockEncoder {
-        const t: u32 = @as(u32, symbol_size);
-        const k: u32 = helpers.intDivCeil(@as(u32, @intCast(data.len)), t);
+        const t: u32 = symbol_size;
+        const k: u32 = helpers.intDivCeil(@intCast(data.len), t);
         const k_prime = systematic_constants.ceilKPrime(k);
         const si = systematic_constants.findSystematicIndex(k_prime).?;
         const s: usize = @intCast(si.s);
         const h: usize = @intCast(si.h);
         const l: usize = @intCast(k_prime + si.s + si.h);
-        const sym_size: usize = @as(usize, symbol_size);
+        const sym_size: usize = symbol_size;
 
-        // Allocate and populate K source symbols from input data
         const source_symbols = try allocator.alloc(Symbol, k);
         var src_init: usize = 0;
         errdefer {
@@ -92,7 +90,7 @@ pub const SourceBlockEncoder = struct {
             }
         }
 
-        // Build D vector: S zero + H zero + K source + (K'-K) zero padding = L symbols
+        // D vector: S+H zero constraint rows, K source, K'-K zero padding
         const d = try allocator.alloc(Symbol, l);
         var d_init: usize = 0;
         errdefer {
@@ -100,25 +98,21 @@ pub const SourceBlockEncoder = struct {
             allocator.free(d);
         }
 
-        // Constraint rows (zeros)
         for (0..s + h) |i| {
             d[i] = try Symbol.init(allocator, sym_size);
             d_init += 1;
         }
 
-        // Source symbols (clone into D)
         for (0..k) |i| {
             d[s + h + i] = try source_symbols[i].clone();
             d_init += 1;
         }
 
-        // Padding symbols (zeros, if K' > K)
-        for (k..@as(usize, @intCast(k_prime))) |i| {
+        for (k..@intCast(k_prime)) |i| {
             d[s + h + i] = try Symbol.init(allocator, sym_size);
             d_init += 1;
         }
 
-        // Build constraint matrix and solve for intermediate symbols
         var a = try constraint_matrix.buildConstraintMatrix(allocator, k_prime);
         defer a.deinit();
 
@@ -179,8 +173,8 @@ pub const Encoder = struct {
         data: []const u8,
         symbol_size: u16,
     ) !Encoder {
-        const t: u32 = @as(u32, symbol_size);
-        const kt = helpers.intDivCeil(@as(u32, @intCast(data.len)), t);
+        const t: u32 = symbol_size;
+        const kt = helpers.intDivCeil(@intCast(data.len), t);
         const z: u32 = @max(1, helpers.intDivCeil(kt, 56403));
         const part = base.partition(kt, z);
 
@@ -193,7 +187,7 @@ pub const Encoder = struct {
 
         var data_offset: usize = 0;
         for (0..z) |sbn_idx| {
-            const num_symbols: u32 = if (@as(u32, @intCast(sbn_idx)) < part.count_large) part.size_large else part.size_small;
+            const num_symbols: u32 = if (sbn_idx < part.count_large) part.size_large else part.size_small;
             const block_data_size: usize = @as(usize, num_symbols) * @as(usize, symbol_size);
             const end = @min(data_offset + block_data_size, data.len);
             blocks[sbn_idx] = try SourceBlockEncoder.init(

@@ -60,13 +60,12 @@ pub const SourceBlockDecoder = struct {
         const s: usize = @intCast(si.s);
         const h: usize = @intCast(si.h);
         const l: usize = @intCast(k_prime + si.s + si.h);
-        const sym_size: usize = @as(usize, self.symbol_size);
+        const sym_size: usize = self.symbol_size;
 
-        // Collect K' received symbols and convert ESIs to ISIs
         const isis = try self.allocator.alloc(u32, k_prime);
         defer self.allocator.free(isis);
 
-        // Build D vector: S+H zero symbols + K' received symbols
+        // D vector: S+H zero constraint rows, K' received symbols
         const d = try self.allocator.alloc(Symbol, l);
         var d_init: usize = 0;
         errdefer {
@@ -74,13 +73,11 @@ pub const SourceBlockDecoder = struct {
             self.allocator.free(d);
         }
 
-        // Constraint rows (zeros)
         for (0..s + h) |i| {
             d[i] = try Symbol.init(self.allocator, sym_size);
             d_init += 1;
         }
 
-        // Fill LT rows with K' received symbols
         var it = self.received_symbols.iterator();
         var count: usize = 0;
         while (it.next()) |entry| {
@@ -93,15 +90,13 @@ pub const SourceBlockDecoder = struct {
             count += 1;
         }
 
-        // Build decoding matrix with the collected ISIs
         var a = try constraint_matrix.buildDecodingMatrix(self.allocator, k_prime, isis[0..count]);
         defer a.deinit();
 
-        // Solve for intermediate symbols (D is modified in-place)
         const result = try pi_solver.solve(self.allocator, &a, d, k);
         self.allocator.free(result.ops.ops);
 
-        // Reconstruct source symbols 0..K-1 via ltEncode
+        // Reconstruct source symbols 0..K-1 from intermediate symbols
         const source = try self.allocator.alloc(Symbol, k);
         var src_init: usize = 0;
         errdefer {
@@ -114,7 +109,6 @@ pub const SourceBlockDecoder = struct {
             src_init += 1;
         }
 
-        // Free intermediate symbols (no longer needed)
         for (d) |sym| sym.deinit();
         self.allocator.free(d);
 
@@ -150,12 +144,12 @@ pub const Decoder = struct {
         const sbn = packet.payload_id.source_block_number;
         if (!self.blocks.contains(sbn)) {
             const kt = helpers.intDivCeil(
-                @as(u32, @intCast(self.config.transfer_length)),
+                @intCast(self.config.transfer_length),
                 @as(u32, self.config.symbol_size),
             );
-            const z: u32 = @as(u32, self.config.num_source_blocks);
+            const z: u32 = self.config.num_source_blocks;
             const part = base.partition(kt, z);
-            const num_symbols: u32 = if (@as(u32, sbn) < part.count_large) part.size_large else part.size_small;
+            const num_symbols: u32 = if (sbn < part.count_large) part.size_large else part.size_small;
             try self.blocks.put(sbn, SourceBlockDecoder.init(
                 self.allocator,
                 sbn,
@@ -172,9 +166,7 @@ pub const Decoder = struct {
     /// Returns the decoded data (truncated to transfer_length) on success.
     /// Caller owns the returned slice.
     pub fn decode(self: *Decoder) !?[]u8 {
-        const z: u32 = @as(u32, self.config.num_source_blocks);
-
-        // All blocks must exist and be fully specified
+        const z: u32 = self.config.num_source_blocks;
         if (self.blocks.count() < z) return null;
         {
             var it = self.blocks.valueIterator();
@@ -183,7 +175,6 @@ pub const Decoder = struct {
             }
         }
 
-        // Decode all blocks and concatenate
         const transfer_length: usize = @intCast(self.config.transfer_length);
         const result = try self.allocator.alloc(u8, transfer_length);
         errdefer self.allocator.free(result);
@@ -286,7 +277,6 @@ test "decoder returns null when insufficient symbols" {
     var dec = Decoder.init(allocator, config);
     defer dec.deinit();
 
-    // No packets added, should return null
     const result = try dec.decode();
     try std.testing.expect(result == null);
 }
