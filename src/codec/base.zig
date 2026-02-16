@@ -60,7 +60,11 @@ pub const ObjectTransmissionInformation = struct {
 
     pub fn deserialize(bytes: [12]u8) ObjectTransmissionInformation {
         return .{
-            .transfer_length = @as(u64, bytes[0]) << 32 | @as(u64, bytes[1]) << 24 | @as(u64, bytes[2]) << 16 | @as(u64, bytes[3]) << 8 | @as(u64, bytes[4]),
+            .transfer_length = @as(u64, bytes[0]) << 32 |
+                @as(u64, bytes[1]) << 24 |
+                @as(u64, bytes[2]) << 16 |
+                @as(u64, bytes[3]) << 8 |
+                @as(u64, bytes[4]),
             .symbol_size = @as(u16, bytes[6]) << 8 | @as(u16, bytes[7]),
             .num_source_blocks = bytes[8],
             .num_sub_blocks = @as(u16, bytes[9]) << 8 | @as(u16, bytes[10]),

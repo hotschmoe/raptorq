@@ -7,10 +7,11 @@ const helpers = @import("../util/helpers.zig");
 /// Rand(y, i, m) as defined in RFC 6330 Section 5.3.5.1
 /// Returns a value in [0, m)
 pub fn rand(y: u32, i: u32, m: u32) u32 {
-    const x0 = (y +% i) % 256;
-    const x1 = ((y +% i) >> 8) % 256;
-    const x2 = ((y +% i) >> 16) % 256;
-    const x3 = ((y +% i) >> 24) % 256;
+    const yi = y +% i;
+    const x0 = yi % 256;
+    const x1 = (yi >> 8) % 256;
+    const x2 = (yi >> 16) % 256;
+    const x3 = (yi >> 24) % 256;
     return (rng_tables.V0[x0] ^ rng_tables.V1[x1] ^ rng_tables.V2[x2] ^ rng_tables.V3[x3]) % m;
 }
 
@@ -48,8 +49,7 @@ pub fn genTuple(k_prime: u32, x: u32) Tuple {
     const w = si.w;
     const p1 = helpers.nextPrime(w);
 
-    var big_a: u32 = 53591 + si.j * 997;
-    if (big_a % 2 == 0) big_a += 1;
+    const big_a: u32 = (53591 + si.j * 997) | 1;
     const big_b: u32 = 10267 *% (si.j + 1);
     const y: u32 = big_b +% x *% big_a;
 
