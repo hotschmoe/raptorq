@@ -1,5 +1,6 @@
 // RaptorQ base types (RFC 6330 Section 3)
 
+const std = @import("std");
 const helpers = @import("../util/helpers.zig");
 
 pub const PayloadId = struct {
@@ -97,4 +98,60 @@ pub fn partition(i: u32, j: u32) Partition {
         .count_small = js,
         .size_small = is,
     };
+}
+
+pub const SubBlockPartition = struct {
+    part: Partition,
+    alignment: u32,
+
+    pub fn init(symbol_size: u32, num_sub_blocks: u32, alignment: u32) !SubBlockPartition {
+        if (alignment == 0 or symbol_size % alignment != 0) return error.InvalidAlignment;
+        const t_al = symbol_size / alignment;
+        if (num_sub_blocks < 1 or num_sub_blocks > t_al) return error.InvalidSubBlockCount;
+        return .{
+            .part = partition(t_al, num_sub_blocks),
+            .alignment = alignment,
+        };
+    }
+
+    pub fn subSymbolSize(self: SubBlockPartition, j: u32) u32 {
+        if (j < self.part.count_large) return self.part.size_large * self.alignment;
+        return self.part.size_small * self.alignment;
+    }
+
+    pub fn subSymbolOffset(self: SubBlockPartition, j: u32) u32 {
+        if (j <= self.part.count_large) {
+            return j * self.part.size_large * self.alignment;
+        }
+        return self.part.count_large * self.part.size_large * self.alignment +
+            (j - self.part.count_large) * self.part.size_small * self.alignment;
+    }
+
+    pub fn numSubBlocks(self: SubBlockPartition) u32 {
+        return self.part.count_large + self.part.count_small;
+    }
+};
+
+test "SubBlockPartition size invariant" {
+    const cases = [_]struct { t: u32, n: u32, al: u32 }{
+        .{ .t = 16, .n = 1, .al = 4 },
+        .{ .t = 16, .n = 2, .al = 4 },
+        .{ .t = 16, .n = 4, .al = 4 },
+        .{ .t = 20, .n = 5, .al = 4 },
+        .{ .t = 12, .n = 3, .al = 4 },
+        .{ .t = 32, .n = 2, .al = 8 },
+        .{ .t = 100, .n = 10, .al = 4 },
+    };
+
+    for (cases) |c| {
+        const sbp = try SubBlockPartition.init(c.t, c.n, c.al);
+        var total: u32 = 0;
+        for (0..c.n) |j| {
+            total += sbp.subSymbolSize(@intCast(j));
+        }
+        try std.testing.expectEqual(c.t, total);
+        const last_offset = sbp.subSymbolOffset(c.n - 1);
+        const last_size = sbp.subSymbolSize(c.n - 1);
+        try std.testing.expectEqual(c.t, last_offset + last_size);
+    }
 }

@@ -2,11 +2,10 @@
 
 Known gaps between the current implementation and full RFC 6330 conformance.
 
-### G-01: Sub-block partitioning (N > 1)
+### ~~G-01: Sub-block partitioning (N > 1)~~ RESOLVED
 - **Feature**: F26
-- **Description**: RFC 6330 Section 4.4.1.1 defines sub-block partitioning where N (num_sub_blocks) can be > 1 to split source blocks into smaller transfer units. The Encoder hardcodes `num_sub_blocks = 1`. Systems requiring N > 1 are not supported.
-- **Severity**: Major
-- **Blocked by**: None
+- **Description**: RFC 6330 Section 4.4.1.1 sub-block partitioning now fully supported. Encoder and Decoder accept `num_sub_blocks` and `alignment` parameters, deinterleave/interleave symbol data across N sub-block encoders/decoders, and concatenate results.
+- **Resolution**: Encoder.init and Decoder.init now accept N and Al. Each source block spawns N independent SourceBlockEncoder/SourceBlockDecoder instances operating on sub-symbol-sized data. Roundtrip tested with N=2 including repair symbols.
 
 ### G-02: SIMD vectorization for bulk GF(256) operations
 - **Feature**: F02

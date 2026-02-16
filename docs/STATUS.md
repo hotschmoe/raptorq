@@ -28,6 +28,5 @@ end-to-end roundtrip verification including repair symbol generation and reconst
 
 ### Remaining Work
 
-- Sub-block partitioning (N > 1) -- currently hardcoded to N=1 (see GAPS.md G-01)
 - SIMD vectorization for bulk GF(256) operations (see GAPS.md G-02)
 - Sparse matrix utilization in constraint matrix / solver pipeline (see GAPS.md G-03)

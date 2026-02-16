@@ -165,38 +165,79 @@ pub const SourceBlockEncoder = struct {
 
 pub const Encoder = struct {
     config: base.ObjectTransmissionInformation,
-    blocks: []SourceBlockEncoder,
+    sub_encoders: []SourceBlockEncoder,
+    sub_block_partition: base.SubBlockPartition,
+    num_sub_blocks: usize,
     allocator: std.mem.Allocator,
 
     pub fn init(
         allocator: std.mem.Allocator,
         data: []const u8,
         symbol_size: u16,
+        num_sub_blocks: u16,
+        alignment: u8,
     ) !Encoder {
         const t: u32 = symbol_size;
+        const al: u32 = alignment;
+        const n: usize = @intCast(num_sub_blocks);
+        const sbp = try base.SubBlockPartition.init(t, @intCast(num_sub_blocks), al);
+
         const kt = helpers.intDivCeil(@intCast(data.len), t);
         const z: u32 = @max(1, helpers.intDivCeil(kt, 56403));
         const part = base.partition(kt, z);
 
-        const blocks = try allocator.alloc(SourceBlockEncoder, z);
+        const sub_encs = try allocator.alloc(SourceBlockEncoder, z * n);
         var init_count: usize = 0;
         errdefer {
-            for (blocks[0..init_count]) |*b| b.deinit();
-            allocator.free(blocks);
+            for (sub_encs[0..init_count]) |*b| b.deinit();
+            allocator.free(sub_encs);
         }
 
         var data_offset: usize = 0;
         for (0..z) |sbn_idx| {
             const num_symbols: u32 = if (sbn_idx < part.count_large) part.size_large else part.size_small;
-            const block_data_size: usize = @as(usize, num_symbols) * @as(usize, symbol_size);
+            const block_data_size: usize = @as(usize, num_symbols) * @as(usize, t);
             const end = @min(data_offset + block_data_size, data.len);
-            blocks[sbn_idx] = try SourceBlockEncoder.init(
-                allocator,
-                @intCast(sbn_idx),
-                symbol_size,
-                data[data_offset..end],
-            );
-            init_count += 1;
+            const block_data = data[data_offset..end];
+            const k: usize = num_symbols;
+
+            if (n == 1) {
+                sub_encs[sbn_idx] = try SourceBlockEncoder.init(
+                    allocator,
+                    @intCast(sbn_idx),
+                    symbol_size,
+                    block_data,
+                );
+                init_count += 1;
+            } else {
+                for (0..n) |j| {
+                    const sub_sym_size: usize = sbp.subSymbolSize(@intCast(j));
+                    const sub_offset: usize = sbp.subSymbolOffset(@intCast(j));
+
+                    const buf = try allocator.alloc(u8, k * sub_sym_size);
+                    defer allocator.free(buf);
+                    @memset(buf, 0);
+
+                    for (0..k) |m| {
+                        const src_start = m * @as(usize, t) + sub_offset;
+                        const dst_start = m * sub_sym_size;
+                        if (src_start < block_data.len) {
+                            const src_end = @min(src_start + sub_sym_size, block_data.len);
+                            const copy_len = src_end - src_start;
+                            @memcpy(buf[dst_start .. dst_start + copy_len], block_data[src_start..src_end]);
+                        }
+                    }
+
+                    sub_encs[sbn_idx * n + j] = try SourceBlockEncoder.init(
+                        allocator,
+                        @intCast(sbn_idx),
+                        @intCast(sub_sym_size),
+                        buf,
+                    );
+                    init_count += 1;
+                }
+            }
+
             data_offset = end;
         }
 
@@ -205,21 +246,50 @@ pub const Encoder = struct {
                 .transfer_length = @intCast(data.len),
                 .symbol_size = symbol_size,
                 .num_source_blocks = @intCast(z),
-                .num_sub_blocks = 1,
-                .alignment = 4,
+                .num_sub_blocks = num_sub_blocks,
+                .alignment = alignment,
             },
-            .blocks = blocks,
+            .sub_encoders = sub_encs,
+            .sub_block_partition = sbp,
+            .num_sub_blocks = n,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Encoder) void {
-        for (self.blocks) |*b| b.deinit();
-        self.allocator.free(self.blocks);
+        for (self.sub_encoders) |*b| b.deinit();
+        self.allocator.free(self.sub_encoders);
     }
 
     pub fn encode(self: *Encoder, sbn: u8, esi: u32) !base.EncodingPacket {
-        return self.blocks[sbn].encodePacket(esi);
+        const n = self.num_sub_blocks;
+        if (n == 1) {
+            return self.sub_encoders[sbn].encodePacket(esi);
+        }
+
+        const t: usize = self.config.symbol_size;
+        const result = try self.allocator.alloc(u8, t);
+        errdefer self.allocator.free(result);
+
+        for (0..n) |j| {
+            var sym = try self.sub_encoders[@as(usize, sbn) * n + j].encodeSymbol(esi);
+            defer sym.deinit();
+            const offset: usize = self.sub_block_partition.subSymbolOffset(@intCast(j));
+            const size: usize = self.sub_block_partition.subSymbolSize(@intCast(j));
+            @memcpy(result[offset .. offset + size], sym.data[0..size]);
+        }
+
+        return .{
+            .payload_id = .{
+                .source_block_number = sbn,
+                .encoding_symbol_id = esi,
+            },
+            .data = result,
+        };
+    }
+
+    pub fn sourceBlockK(self: Encoder, sbn: u8) u32 {
+        return self.sub_encoders[@as(usize, sbn) * self.num_sub_blocks].k;
     }
 
     pub fn objectTransmissionInformation(self: Encoder) base.ObjectTransmissionInformation {
@@ -271,7 +341,7 @@ test "Encoder init and encode" {
     const data = "RaptorQ FEC encoding test data for the Encoder struct";
     const symbol_size: u16 = 8;
 
-    var enc = try Encoder.init(allocator, data, symbol_size);
+    var enc = try Encoder.init(allocator, data, symbol_size, 1, 4);
     defer enc.deinit();
 
     try std.testing.expectEqual(@as(u8, 1), enc.config.num_source_blocks);

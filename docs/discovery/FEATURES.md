@@ -29,4 +29,4 @@ Features identified from cberner/raptorq Rust implementation mapped to RFC 6330.
 | F23 | Source block decoder | 5.4 | codec/decoder.zig | Complete |
 | F24 | Multi-block encoder | 4.4 | codec/encoder.zig | Complete |
 | F25 | Multi-block decoder | 4.4 | codec/decoder.zig | Complete |
-| F26 | Sub-block partitioning | 4.4.1.1 | - | Not Implemented (N=1 only) |
+| F26 | Sub-block partitioning | 4.4.1.1 | codec/base.zig, codec/encoder.zig, codec/decoder.zig | Complete |

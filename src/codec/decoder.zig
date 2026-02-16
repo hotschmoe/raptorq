@@ -118,30 +118,45 @@ pub const SourceBlockDecoder = struct {
 
 pub const Decoder = struct {
     config: base.ObjectTransmissionInformation,
-    blocks: std.AutoHashMap(u8, SourceBlockDecoder),
+    blocks: std.AutoHashMap(u8, []SourceBlockDecoder),
+    sub_block_partition: base.SubBlockPartition,
+    num_sub_blocks: usize,
     allocator: std.mem.Allocator,
 
     pub fn init(
         allocator: std.mem.Allocator,
         config: base.ObjectTransmissionInformation,
-    ) Decoder {
+    ) !Decoder {
+        const sbp = try base.SubBlockPartition.init(
+            @as(u32, config.symbol_size),
+            @as(u32, config.num_sub_blocks),
+            @as(u32, config.alignment),
+        );
         return .{
             .config = config,
-            .blocks = std.AutoHashMap(u8, SourceBlockDecoder).init(allocator),
+            .blocks = std.AutoHashMap(u8, []SourceBlockDecoder).init(allocator),
+            .sub_block_partition = sbp,
+            .num_sub_blocks = @intCast(config.num_sub_blocks),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Decoder) void {
         var it = self.blocks.valueIterator();
-        while (it.next()) |block| block.deinit();
+        while (it.next()) |decoders| {
+            for (decoders.*) |*dec| dec.deinit();
+            self.allocator.free(decoders.*);
+        }
         self.blocks.deinit();
     }
 
-    /// Add a received encoding packet. Routes to the appropriate SourceBlockDecoder
-    /// by SBN, lazily creating decoders as needed.
+    /// Add a received encoding packet. Routes to the appropriate SourceBlockDecoders
+    /// by SBN, lazily creating decoders as needed. For N > 1, splits the received
+    /// symbol into sub-symbols and routes each to the corresponding sub-block decoder.
     pub fn addPacket(self: *Decoder, packet: base.EncodingPacket) !void {
         const sbn = packet.payload_id.source_block_number;
+        const n = self.num_sub_blocks;
+
         if (!self.blocks.contains(sbn)) {
             const kt = helpers.intDivCeil(
                 @intCast(self.config.transfer_length),
@@ -150,15 +165,36 @@ pub const Decoder = struct {
             const z: u32 = self.config.num_source_blocks;
             const part = base.partition(kt, z);
             const num_symbols: u32 = if (sbn < part.count_large) part.size_large else part.size_small;
-            try self.blocks.put(sbn, SourceBlockDecoder.init(
-                self.allocator,
-                sbn,
-                num_symbols,
-                self.config.symbol_size,
-            ));
+
+            const decoders = try self.allocator.alloc(SourceBlockDecoder, n);
+            for (0..n) |j| {
+                const sub_sym_size = self.sub_block_partition.subSymbolSize(@intCast(j));
+                decoders[j] = SourceBlockDecoder.init(
+                    self.allocator,
+                    sbn,
+                    num_symbols,
+                    @intCast(sub_sym_size),
+                );
+            }
+            self.blocks.put(sbn, decoders) catch |err| {
+                self.allocator.free(decoders);
+                return err;
+            };
         }
-        const block = self.blocks.getPtr(sbn).?;
-        try block.addEncodingSymbol(packet);
+
+        const decoders = self.blocks.get(sbn).?;
+        if (n == 1) {
+            try decoders[0].addEncodingSymbol(packet);
+        } else {
+            for (0..n) |j| {
+                const sub_offset: usize = self.sub_block_partition.subSymbolOffset(@intCast(j));
+                const sub_size: usize = self.sub_block_partition.subSymbolSize(@intCast(j));
+                try decoders[j].addEncodingSymbol(.{
+                    .payload_id = packet.payload_id,
+                    .data = packet.data[sub_offset .. sub_offset + sub_size],
+                });
+            }
+        }
     }
 
     /// Attempt to decode the full transfer object.
@@ -167,11 +203,15 @@ pub const Decoder = struct {
     /// Caller owns the returned slice.
     pub fn decode(self: *Decoder) !?[]u8 {
         const z: u32 = self.config.num_source_blocks;
+        const n = self.num_sub_blocks;
+
         if (self.blocks.count() < z) return null;
         {
             var it = self.blocks.valueIterator();
-            while (it.next()) |block| {
-                if (!block.fullySpecified()) return null;
+            while (it.next()) |decoders| {
+                for (decoders.*) |dec| {
+                    if (!dec.fullySpecified()) return null;
+                }
             }
         }
 
@@ -182,17 +222,48 @@ pub const Decoder = struct {
         var offset: usize = 0;
         var sbn: u8 = 0;
         while (sbn < z) : (sbn += 1) {
-            const block = self.blocks.getPtr(sbn).?;
-            const source_symbols = try block.decode();
-            defer {
-                for (source_symbols) |sym| sym.deinit();
-                self.allocator.free(source_symbols);
-            }
-            for (source_symbols) |sym| {
-                const copy_len = @min(sym.data.len, transfer_length - offset);
-                if (copy_len > 0) {
-                    @memcpy(result[offset .. offset + copy_len], sym.data[0..copy_len]);
-                    offset += copy_len;
+            const decoders = self.blocks.get(sbn).?;
+
+            if (n == 1) {
+                const source_symbols = try decoders[0].decode();
+                defer {
+                    for (source_symbols) |sym| sym.deinit();
+                    self.allocator.free(source_symbols);
+                }
+                for (source_symbols) |sym| {
+                    const copy_len = @min(sym.data.len, transfer_length - offset);
+                    if (copy_len > 0) {
+                        @memcpy(result[offset .. offset + copy_len], sym.data[0..copy_len]);
+                        offset += copy_len;
+                    }
+                }
+            } else {
+                const k: usize = decoders[0].num_source_symbols;
+
+                const sub_results = try self.allocator.alloc([]Symbol, n);
+                defer self.allocator.free(sub_results);
+                var decoded_count: usize = 0;
+                defer {
+                    for (sub_results[0..decoded_count]) |symbols| {
+                        for (symbols) |sym| sym.deinit();
+                        self.allocator.free(symbols);
+                    }
+                }
+
+                for (0..n) |j| {
+                    sub_results[j] = try decoders[j].decode();
+                    decoded_count += 1;
+                }
+
+                for (0..k) |m| {
+                    for (0..n) |j| {
+                        const sub_size: usize = self.sub_block_partition.subSymbolSize(@intCast(j));
+                        const copy_len = @min(sub_size, transfer_length - offset);
+                        if (copy_len > 0) {
+                            @memcpy(result[offset .. offset + copy_len], sub_results[j][m].data[0..copy_len]);
+                            offset += copy_len;
+                        }
+                    }
                 }
             }
         }
@@ -207,14 +278,14 @@ test "encode-decode roundtrip with source symbols only" {
     const symbol_size: u16 = 8;
 
     // Encode
-    var enc = try encoder.Encoder.init(allocator, data, symbol_size);
+    var enc = try encoder.Encoder.init(allocator, data, symbol_size, 1, 4);
     defer enc.deinit();
 
     // Decode using only source symbols
-    var dec = Decoder.init(allocator, enc.config);
+    var dec = try Decoder.init(allocator, enc.config);
     defer dec.deinit();
 
-    const k = enc.blocks[0].k;
+    const k = enc.sourceBlockK(0);
     var esi: u32 = 0;
     while (esi < k) : (esi += 1) {
         const pkt = try enc.encode(0, esi);
@@ -232,15 +303,15 @@ test "encode-decode roundtrip with repair symbols" {
     const data = "Repair symbol roundtrip test data!!";
     const symbol_size: u16 = 4;
 
-    var enc = try encoder.Encoder.init(allocator, data, symbol_size);
+    var enc = try encoder.Encoder.init(allocator, data, symbol_size, 1, 4);
     defer enc.deinit();
 
-    var dec = Decoder.init(allocator, enc.config);
+    var dec = try Decoder.init(allocator, enc.config);
     defer dec.deinit();
 
     // Send all source symbols except the first two, plus repair symbols to compensate
-    const k = enc.blocks[0].k;
-    const k_prime = enc.blocks[0].k_prime;
+    const k = enc.sourceBlockK(0);
+    const k_prime = enc.sub_encoders[0].k_prime;
     var esi: u32 = 2;
     while (esi < k) : (esi += 1) {
         const pkt = try enc.encode(0, esi);
@@ -274,9 +345,70 @@ test "decoder returns null when insufficient symbols" {
         .alignment = 4,
     };
 
-    var dec = Decoder.init(allocator, config);
+    var dec = try Decoder.init(allocator, config);
     defer dec.deinit();
 
     const result = try dec.decode();
     try std.testing.expect(result == null);
+}
+
+test "sub-block roundtrip N=2 source symbols only" {
+    const allocator = std.testing.allocator;
+    const data = "Sub-block test data with N equals two!";
+    const symbol_size: u16 = 16;
+
+    var enc = try encoder.Encoder.init(allocator, data, symbol_size, 2, 4);
+    defer enc.deinit();
+
+    var dec = try Decoder.init(allocator, enc.config);
+    defer dec.deinit();
+
+    const k = enc.sourceBlockK(0);
+    var esi: u32 = 0;
+    while (esi < k) : (esi += 1) {
+        const pkt = try enc.encode(0, esi);
+        defer allocator.free(pkt.data);
+        try dec.addPacket(pkt);
+    }
+
+    const decoded = (try dec.decode()).?;
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, data, decoded);
+}
+
+test "sub-block roundtrip N=2 with repair symbols" {
+    const allocator = std.testing.allocator;
+    const data = "Sub-block repair symbol test!!";
+    const symbol_size: u16 = 16;
+
+    var enc = try encoder.Encoder.init(allocator, data, symbol_size, 2, 4);
+    defer enc.deinit();
+
+    var dec = try Decoder.init(allocator, enc.config);
+    defer dec.deinit();
+
+    const k = enc.sourceBlockK(0);
+    const k_prime = enc.sub_encoders[0].k_prime;
+
+    // Skip first 2 source symbols
+    var esi: u32 = 2;
+    while (esi < k) : (esi += 1) {
+        const pkt = try enc.encode(0, esi);
+        defer allocator.free(pkt.data);
+        try dec.addPacket(pkt);
+    }
+
+    // Add repair symbols to reach K' total
+    const needed = k_prime - (k - 2);
+    esi = k;
+    var sent: u32 = 0;
+    while (sent < needed) : (sent += 1) {
+        const pkt = try enc.encode(0, esi + sent);
+        defer allocator.free(pkt.data);
+        try dec.addPacket(pkt);
+    }
+
+    const decoded = (try dec.decode()).?;
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, data, decoded);
 }
