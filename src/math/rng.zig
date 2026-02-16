@@ -47,7 +47,9 @@ pub const Tuple = struct {
 pub fn genTuple(k_prime: u32, x: u32) Tuple {
     const si = systematic_constants.findSystematicIndex(k_prime).?;
     const w = si.w;
-    const p1 = helpers.nextPrime(w);
+    const l = k_prime + si.s + si.h;
+    const p = l - w;
+    const p1 = helpers.nextPrime(p);
 
     const big_a: u32 = (53591 + si.j * 997) | 1;
     const big_b: u32 = 10267 *% (si.j + 1);

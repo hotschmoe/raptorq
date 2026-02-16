@@ -519,8 +519,9 @@ pub fn numLTSymbols(k_prime: u32) u32 {
     return si.w;
 }
 
-/// Compute the number of PI symbols: P1 = smallest prime >= W.
+/// Compute the number of PI symbols: P1 = smallest prime >= P, where P = L - W.
 pub fn numPISymbols(k_prime: u32) u32 {
     const si = findSystematicIndex(k_prime).?;
-    return helpers.nextPrime(si.w);
+    const l = k_prime + si.s + si.h;
+    return helpers.nextPrime(l - si.w);
 }
