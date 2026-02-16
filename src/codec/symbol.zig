@@ -9,13 +9,15 @@ pub const Symbol = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, size: usize) !Symbol {
-        _ = .{ allocator, size };
-        @panic("TODO");
+        const data = try allocator.alloc(u8, size);
+        @memset(data, 0);
+        return .{ .data = data, .allocator = allocator };
     }
 
     pub fn fromSlice(allocator: std.mem.Allocator, src: []const u8) !Symbol {
-        _ = .{ allocator, src };
-        @panic("TODO");
+        const data = try allocator.alloc(u8, src.len);
+        @memcpy(data, src);
+        return .{ .data = data, .allocator = allocator };
     }
 
     pub fn deinit(self: Symbol) void {
@@ -23,23 +25,19 @@ pub const Symbol = struct {
     }
 
     pub fn clone(self: Symbol) !Symbol {
-        _ = self;
-        @panic("TODO");
+        return fromSlice(self.allocator, self.data);
     }
 
     pub fn addAssign(self: *Symbol, other: Symbol) void {
-        _ = .{ self, other };
-        @panic("TODO");
+        octets.addAssign(self.data, other.data);
     }
 
     pub fn mulAssign(self: *Symbol, scalar: Octet) void {
-        _ = .{ self, scalar };
-        @panic("TODO");
+        octets.mulAssignScalar(self.data, scalar);
     }
 
     pub fn fma(self: *Symbol, other: Symbol, scalar: Octet) void {
-        _ = .{ self, other, scalar };
-        @panic("TODO");
+        octets.fmaSlice(self.data, other.data, scalar);
     }
 
     pub fn len(self: Symbol) usize {

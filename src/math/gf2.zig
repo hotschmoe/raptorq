@@ -2,24 +2,31 @@
 
 /// dst[i] ^= src[i] for all i
 pub fn xorSlice(dst: []u64, src: []const u64) void {
-    _ = .{ dst, src };
-    @panic("TODO");
+    for (dst, src) |*d, s| {
+        d.* ^= s;
+    }
 }
 
 /// Count total set bits across slice.
 pub fn countOnes(data: []const u64) usize {
-    _ = data;
-    @panic("TODO");
+    var count: usize = 0;
+    for (data) |word| {
+        count += @popCount(word);
+    }
+    return count;
 }
 
 /// Get bit at position within packed u64 slice.
 pub fn getBit(data: []const u64, pos: usize) bool {
-    _ = .{ data, pos };
-    @panic("TODO");
+    return (data[pos / 64] >> @intCast(pos % 64)) & 1 == 1;
 }
 
 /// Set bit at position within packed u64 slice.
 pub fn setBit(data: []u64, pos: usize, val: bool) void {
-    _ = .{ data, pos, val };
-    @panic("TODO");
+    const bit: u6 = @intCast(pos % 64);
+    if (val) {
+        data[pos / 64] |= @as(u64, 1) << bit;
+    } else {
+        data[pos / 64] &= ~(@as(u64, 1) << bit);
+    }
 }
