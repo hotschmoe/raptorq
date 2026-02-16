@@ -27,11 +27,11 @@
 - [x] `src/solver/pi_solver.zig` -- 5-phase inactivation decoding
 
 ## Layer 5: Codec High-Level
-- [ ] `src/codec/encoder.zig` -- SourceBlockEncoder, Encoder
-- [ ] `src/codec/decoder.zig` -- SourceBlockDecoder, Decoder
+- [x] `src/codec/encoder.zig` -- SourceBlockEncoder, Encoder
+- [x] `src/codec/decoder.zig` -- SourceBlockDecoder, Decoder
 
 ## Layer 6: Public API
-- [ ] `src/root.zig` -- Library entry point, re-exports
+- [x] `src/root.zig` -- Library entry point, re-exports
 
 ## Utilities
 - [x] `src/util/helpers.zig` -- intDivCeil, isPrime, nextPrime

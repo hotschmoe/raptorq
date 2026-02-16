@@ -17,10 +17,31 @@ pub fn buildConstraintMatrix(allocator: std.mem.Allocator, k_prime: u32) !OctetM
     const l = k_prime + s + h;
 
     var matrix = try OctetMatrix.init(allocator, l, l);
+    errdefer matrix.deinit();
 
     generateLDPC(&matrix, k_prime, s);
     try generateHDPC(allocator, &matrix, k_prime, s, h);
     generateLT(&matrix, k_prime, s, h, k_prime);
+
+    return matrix;
+}
+
+/// Build a decoding matrix for given K' and received ISIs.
+/// Same structure as the encoding constraint matrix (LDPC + HDPC + LT rows)
+/// but the LT rows correspond to the provided ISIs instead of 0..K'-1.
+/// Requires isis.len == K' (the matrix must be square L x L).
+pub fn buildDecodingMatrix(allocator: std.mem.Allocator, k_prime: u32, isis: []const u32) !OctetMatrix {
+    const si = systematic_constants.findSystematicIndex(k_prime).?;
+    const s = si.s;
+    const h = si.h;
+    const l = k_prime + s + h;
+
+    var matrix = try OctetMatrix.init(allocator, l, l);
+    errdefer matrix.deinit();
+
+    generateLDPC(&matrix, k_prime, s);
+    try generateHDPC(allocator, &matrix, k_prime, s, h);
+    generateLTRows(&matrix, k_prime, s, h, isis);
 
     return matrix;
 }
@@ -173,6 +194,45 @@ pub fn generateLT(matrix: *OctetMatrix, k_prime: u32, s: u32, h: u32, num_symbol
     }
 }
 
+/// Generate LT rows for arbitrary ISIs (used by decoder).
+/// Fills rows S+H..S+H+isis.len-1, using isis[i] as the ISI for row i.
+pub fn generateLTRows(matrix: *OctetMatrix, k_prime: u32, s: u32, h: u32, isis: []const u32) void {
+    const si = systematic_constants.findSystematicIndex(k_prime).?;
+    const w = si.w;
+    const l = k_prime + s + h;
+    const p = l - w;
+    const p1 = helpers.nextPrime(p);
+
+    for (isis, 0..) |isi, x| {
+        const tuple = rng.genTuple(k_prime, isi);
+        const row: u32 = s + h + @as(u32, @intCast(x));
+
+        // LT part: d entries in columns [0..W)
+        var b_val = tuple.b;
+        matrix.set(row, b_val, Octet.ONE);
+        var j: u32 = 1;
+        while (j < tuple.d) : (j += 1) {
+            b_val = (b_val + tuple.a) % w;
+            matrix.set(row, b_val, Octet.ONE);
+        }
+
+        // PI part: d1 entries in columns [W..W+P)
+        var b1 = tuple.b1;
+        while (b1 >= p) {
+            b1 = (b1 + tuple.a1) % p1;
+        }
+        matrix.set(row, w + b1, Octet.ONE);
+        j = 1;
+        while (j < tuple.d1) : (j += 1) {
+            b1 = (b1 + tuple.a1) % p1;
+            while (b1 >= p) {
+                b1 = (b1 + tuple.a1) % p1;
+            }
+            matrix.set(row, w + b1, Octet.ONE);
+        }
+    }
+}
+
 test "buildConstraintMatrix dimensions K'=10" {
     // K'=10: S=7, H=10, W=17, L=27
     var m = try buildConstraintMatrix(std.testing.allocator, 10);
@@ -218,6 +278,27 @@ test "buildConstraintMatrix HDPC identity block K'=10" {
             } else {
                 try std.testing.expect(val.isZero());
             }
+        }
+    }
+}
+
+test "generateLTRows matches generateLT for sequential ISIs" {
+    // buildDecodingMatrix with ISIs 0..K'-1 should produce the same matrix as buildConstraintMatrix
+    const k_prime: u32 = 10;
+
+    var encoding = try buildConstraintMatrix(std.testing.allocator, k_prime);
+    defer encoding.deinit();
+
+    const isis = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    var decoding = try buildDecodingMatrix(std.testing.allocator, k_prime, &isis);
+    defer decoding.deinit();
+
+    const l = encoding.numRows();
+    var row: u32 = 0;
+    while (row < l) : (row += 1) {
+        var col: u32 = 0;
+        while (col < l) : (col += 1) {
+            try std.testing.expectEqual(encoding.get(row, col).value, decoding.get(row, col).value);
         }
     }
 }
