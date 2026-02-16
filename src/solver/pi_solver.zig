@@ -6,7 +6,6 @@ const OctetMatrix = @import("../matrix/octet_matrix.zig").OctetMatrix;
 const Symbol = @import("../codec/symbol.zig").Symbol;
 const OperationVector = @import("../codec/operation_vector.zig").OperationVector;
 const SymbolOp = @import("../codec/operation_vector.zig").SymbolOp;
-const Graph = @import("graph.zig").Graph;
 
 pub const SolverError = error{ SingularMatrix, OutOfMemory };
 
@@ -79,6 +78,34 @@ const SolverState = struct {
         }
         return count;
     }
+
+    /// Scale pivot row to 1 and eliminate all rows below position i.
+    fn scalePivotAndEliminate(self: *SolverState) SolverError!void {
+        const pivot_val = self.a.get(self.i, self.i);
+        if (pivot_val.isZero()) return error.SingularMatrix;
+
+        if (!pivot_val.isOne()) {
+            const inv = pivot_val.inverse();
+            self.a.mulAssignRow(self.i, inv);
+            self.ops.append(self.allocator, .{ .mul_assign = .{
+                .index = self.row_perm[self.i],
+                .scalar = inv,
+            } }) catch return error.OutOfMemory;
+        }
+
+        var row: u32 = self.i + 1;
+        while (row < self.l) : (row += 1) {
+            const factor = self.a.get(row, self.i);
+            if (!factor.isZero()) {
+                self.a.fmaRow(self.i, row, factor);
+                self.ops.append(self.allocator, .{ .fma = .{
+                    .src = self.row_perm[self.i],
+                    .dst = self.row_perm[row],
+                    .scalar = factor,
+                } }) catch return error.OutOfMemory;
+            }
+        }
+    }
 };
 
 /// Solve for intermediate symbols using inactivation decoding.
@@ -91,19 +118,14 @@ pub fn solve(
 ) SolverError!IntermediateSymbolResult {
     _ = num_source_symbols;
     var state = SolverState.init(allocator, constraint_matrix) catch return error.OutOfMemory;
-    errdefer state.deinit();
+    defer state.deinit();
 
     try phase1(&state);
     try phase2(&state);
-    phase3(&state);
-    phase4(&state);
+    // Phases 3-4 (backward substitution) are subsumed by phase 2's full elimination.
     try phase5(&state, symbols);
 
     const ops_slice = state.ops.toOwnedSlice(allocator) catch return error.OutOfMemory;
-
-    // Free permutation arrays (ops are now owned by the returned slice)
-    allocator.free(state.row_perm);
-    allocator.free(state.col_perm);
 
     return .{
         .symbols = symbols,
@@ -140,45 +162,18 @@ fn phase1(state: *SolverState) SolverError!void {
             return error.SingularMatrix;
         }
 
-        if (min_r == 1) {
-            // Swap the row with min nonzeros to position i
-            state.swapPhysicalRows(state.i, min_row_idx);
+        // All branches: move chosen row to position i, then select pivot column(s)
+        state.swapPhysicalRows(state.i, min_row_idx);
 
-            // Find the column with the nonzero in [i..v_end)
+        if (min_r == 1) {
+            // Single nonzero: find and swap it to the diagonal
             var pivot_col = state.i;
             while (pivot_col < v_end) : (pivot_col += 1) {
                 if (!state.a.get(state.i, pivot_col).isZero()) break;
             }
             state.swapPhysicalCols(state.i, pivot_col);
-
-            // Scale row if pivot != 1
-            const pivot_val = state.a.get(state.i, state.i);
-            if (!pivot_val.isOne()) {
-                const inv = pivot_val.inverse();
-                state.a.mulAssignRow(state.i, inv);
-                state.ops.append(state.allocator,.{ .mul_assign = .{ .index = state.row_perm[state.i], .scalar = inv } }) catch return error.OutOfMemory;
-            }
-
-            // Eliminate below
-            {
-                var row: u32 = state.i + 1;
-                while (row < l) : (row += 1) {
-                    const factor = state.a.get(row, state.i);
-                    if (!factor.isZero()) {
-                        state.a.fmaRow(state.i, row, factor);
-                        state.ops.append(state.allocator,.{ .fma = .{
-                            .src = state.row_perm[state.i],
-                            .dst = state.row_perm[row],
-                            .scalar = factor,
-                        } }) catch return error.OutOfMemory;
-                    }
-                }
-            }
         } else if (min_r == 2) {
-            // r=2: Graph heuristic
-            state.swapPhysicalRows(state.i, min_row_idx);
-
-            // Find two nonzero columns in [i..v_end)
+            // Two nonzeros: pivot on first, inactivate second
             var cols_found: [2]u32 = undefined;
             var cf: u32 = 0;
             {
@@ -190,98 +185,36 @@ fn phase1(state: *SolverState) SolverError!void {
                     }
                 }
             }
-
-            // Pivot on first column, inactivate second
             state.swapPhysicalCols(state.i, cols_found[0]);
-            // Move second nonzero to inactivated region
-            if (cols_found[1] == state.i) {
-                // cols_found[0] was swapped to state.i, cols_found[1] was originally state.i
-                // After the swap, the value at cols_found[0] is now at state.i
-                // We need to find where cols_found[1] ended up
-                state.swapPhysicalCols(v_end - 1, cols_found[0]);
-            } else {
-                state.swapPhysicalCols(v_end - 1, cols_found[1]);
-            }
+            // After swapping cols_found[0] to state.i, the second nonzero
+            // may have moved if it was originally at state.i
+            const second = if (cols_found[1] == state.i) cols_found[0] else cols_found[1];
+            state.swapPhysicalCols(v_end - 1, second);
             state.u_count += 1;
-
-            // Scale pivot row
-            const pivot_val = state.a.get(state.i, state.i);
-            if (!pivot_val.isZero() and !pivot_val.isOne()) {
-                const inv = pivot_val.inverse();
-                state.a.mulAssignRow(state.i, inv);
-                state.ops.append(state.allocator,.{ .mul_assign = .{ .index = state.row_perm[state.i], .scalar = inv } }) catch return error.OutOfMemory;
-            } else if (pivot_val.isZero()) {
-                return error.SingularMatrix;
-            }
-
-            // Eliminate below
-            {
-                var row: u32 = state.i + 1;
-                while (row < l) : (row += 1) {
-                    const factor = state.a.get(row, state.i);
-                    if (!factor.isZero()) {
-                        state.a.fmaRow(state.i, row, factor);
-                        state.ops.append(state.allocator,.{ .fma = .{
-                            .src = state.row_perm[state.i],
-                            .dst = state.row_perm[row],
-                            .scalar = factor,
-                        } }) catch return error.OutOfMemory;
-                    }
-                }
-            }
         } else {
-            // r >= 3: Swap row to i, pivot one column, inactivate remaining r-1
-            state.swapPhysicalRows(state.i, min_row_idx);
-
-            // Find the first nonzero column in [i..v_end) for pivot
+            // r >= 3: pivot first nonzero, inactivate the rest
             var first_nz: u32 = state.i;
             while (first_nz < v_end) : (first_nz += 1) {
                 if (!state.a.get(state.i, first_nz).isZero()) break;
             }
             state.swapPhysicalCols(state.i, first_nz);
 
-            // Inactivate remaining nonzero columns
             var inactivated: u32 = 0;
-            {
-                var c = state.i + 1;
-                var current_v_end = v_end;
-                while (c < current_v_end) {
-                    if (!state.a.get(state.i, c).isZero()) {
-                        current_v_end -= 1;
-                        state.swapPhysicalCols(c, current_v_end);
-                        inactivated += 1;
-                    } else {
-                        c += 1;
-                    }
+            var c = state.i + 1;
+            var current_v_end = v_end;
+            while (c < current_v_end) {
+                if (!state.a.get(state.i, c).isZero()) {
+                    current_v_end -= 1;
+                    state.swapPhysicalCols(c, current_v_end);
+                    inactivated += 1;
+                } else {
+                    c += 1;
                 }
             }
             state.u_count += inactivated;
-
-            // Scale pivot row
-            const pivot_val = state.a.get(state.i, state.i);
-            if (!pivot_val.isOne()) {
-                if (pivot_val.isZero()) return error.SingularMatrix;
-                const inv = pivot_val.inverse();
-                state.a.mulAssignRow(state.i, inv);
-                state.ops.append(state.allocator,.{ .mul_assign = .{ .index = state.row_perm[state.i], .scalar = inv } }) catch return error.OutOfMemory;
-            }
-
-            // Eliminate below
-            {
-                var row: u32 = state.i + 1;
-                while (row < l) : (row += 1) {
-                    const factor = state.a.get(row, state.i);
-                    if (!factor.isZero()) {
-                        state.a.fmaRow(state.i, row, factor);
-                        state.ops.append(state.allocator,.{ .fma = .{
-                            .src = state.row_perm[state.i],
-                            .dst = state.row_perm[row],
-                            .scalar = factor,
-                        } }) catch return error.OutOfMemory;
-                    }
-                }
-            }
         }
+
+        try state.scalePivotAndEliminate();
 
         state.i += 1;
     }
@@ -339,20 +272,6 @@ fn phase2(state: *SolverState) SolverError!void {
             }
         }
     }
-}
-
-/// Phase 3: Backward substitution for inactivated (Section 5.4.2.4)
-/// Zero out entries in the first i rows for the inactivated columns.
-fn phase3(state: *SolverState) void {
-    // After phase 2, the inactivated columns (i..L-1) are already handled
-    // by phase 2's full elimination. Nothing additional needed.
-    _ = state;
-}
-
-/// Phase 4: Back-substitute first i rows (Section 5.4.2.5)
-/// After phase 2 does full elimination, this is a no-op.
-fn phase4(state: *SolverState) void {
-    _ = state;
 }
 
 /// Phase 5: Apply recorded operations to symbols and remap (Section 5.4.2.6)

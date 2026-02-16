@@ -32,8 +32,6 @@ pub fn generateLDPC(matrix: *OctetMatrix, k_prime: u32, s: u32) void {
     const w = si.w;
     const b = w - s;
     const p = k_prime + s + si.h - w;
-    const p1 = helpers.nextPrime(p);
-    _ = p1;
 
     // Sub-part 1: LDPC circulant (B columns, S rows)
     // For i = 0..B-1: set 3 positions per column

@@ -8,7 +8,6 @@ pub const SparseBinaryMatrix = struct {
     rows: u32,
     cols: u32,
     sparse_rows: []SparseBinaryVec,
-    dense_threshold: u32,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, rows: u32, cols: u32) !SparseBinaryMatrix {
@@ -20,7 +19,6 @@ pub const SparseBinaryMatrix = struct {
             .rows = rows,
             .cols = cols,
             .sparse_rows = sparse_rows,
-            .dense_threshold = cols / 2,
             .allocator = allocator,
         };
     }
