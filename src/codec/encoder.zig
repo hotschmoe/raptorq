@@ -167,7 +167,6 @@ pub const Encoder = struct {
     config: base.ObjectTransmissionInformation,
     sub_encoders: []SourceBlockEncoder,
     sub_block_partition: base.SubBlockPartition,
-    num_sub_blocks: usize,
     allocator: std.mem.Allocator,
 
     pub fn init(
@@ -189,17 +188,16 @@ pub const Encoder = struct {
         const sub_encs = try allocator.alloc(SourceBlockEncoder, z * n);
         var init_count: usize = 0;
         errdefer {
-            for (sub_encs[0..init_count]) |*b| b.deinit();
+            for (sub_encs[0..init_count]) |*enc| enc.deinit();
             allocator.free(sub_encs);
         }
 
         var data_offset: usize = 0;
         for (0..z) |sbn_idx| {
             const num_symbols: u32 = if (sbn_idx < part.count_large) part.size_large else part.size_small;
-            const block_data_size: usize = @as(usize, num_symbols) * @as(usize, t);
-            const end = @min(data_offset + block_data_size, data.len);
+            const block_len: usize = @as(usize, num_symbols) * @as(usize, t);
+            const end = @min(data_offset + block_len, data.len);
             const block_data = data[data_offset..end];
-            const k: usize = num_symbols;
 
             if (n == 1) {
                 sub_encs[sbn_idx] = try SourceBlockEncoder.init(
@@ -214,17 +212,17 @@ pub const Encoder = struct {
                     const sub_sym_size: usize = sbp.subSymbolSize(@intCast(j));
                     const sub_offset: usize = sbp.subSymbolOffset(@intCast(j));
 
-                    const buf = try allocator.alloc(u8, k * sub_sym_size);
+                    // Deinterleave: extract sub-symbol j from each source symbol
+                    const buf = try allocator.alloc(u8, num_symbols * sub_sym_size);
                     defer allocator.free(buf);
                     @memset(buf, 0);
 
-                    for (0..k) |m| {
-                        const src_start = m * @as(usize, t) + sub_offset;
-                        const dst_start = m * sub_sym_size;
+                    for (0..num_symbols) |sym_idx| {
+                        const src_start = sym_idx * @as(usize, t) + sub_offset;
+                        const dst_start = sym_idx * sub_sym_size;
                         if (src_start < block_data.len) {
                             const src_end = @min(src_start + sub_sym_size, block_data.len);
-                            const copy_len = src_end - src_start;
-                            @memcpy(buf[dst_start .. dst_start + copy_len], block_data[src_start..src_end]);
+                            @memcpy(buf[dst_start .. dst_start + (src_end - src_start)], block_data[src_start..src_end]);
                         }
                     }
 
@@ -251,18 +249,17 @@ pub const Encoder = struct {
             },
             .sub_encoders = sub_encs,
             .sub_block_partition = sbp,
-            .num_sub_blocks = n,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Encoder) void {
-        for (self.sub_encoders) |*b| b.deinit();
+        for (self.sub_encoders) |*enc| enc.deinit();
         self.allocator.free(self.sub_encoders);
     }
 
     pub fn encode(self: *Encoder, sbn: u8, esi: u32) !base.EncodingPacket {
-        const n = self.num_sub_blocks;
+        const n: usize = self.config.num_sub_blocks;
         if (n == 1) {
             return self.sub_encoders[sbn].encodePacket(esi);
         }
@@ -289,7 +286,8 @@ pub const Encoder = struct {
     }
 
     pub fn sourceBlockK(self: Encoder, sbn: u8) u32 {
-        return self.sub_encoders[@as(usize, sbn) * self.num_sub_blocks].k;
+        const n: usize = self.config.num_sub_blocks;
+        return self.sub_encoders[@as(usize, sbn) * n].k;
     }
 
     pub fn objectTransmissionInformation(self: Encoder) base.ObjectTransmissionInformation {

@@ -120,7 +120,6 @@ pub const Decoder = struct {
     config: base.ObjectTransmissionInformation,
     blocks: std.AutoHashMap(u8, []SourceBlockDecoder),
     sub_block_partition: base.SubBlockPartition,
-    num_sub_blocks: usize,
     allocator: std.mem.Allocator,
 
     pub fn init(
@@ -136,7 +135,6 @@ pub const Decoder = struct {
             .config = config,
             .blocks = std.AutoHashMap(u8, []SourceBlockDecoder).init(allocator),
             .sub_block_partition = sbp,
-            .num_sub_blocks = @intCast(config.num_sub_blocks),
             .allocator = allocator,
         };
     }
@@ -155,15 +153,14 @@ pub const Decoder = struct {
     /// symbol into sub-symbols and routes each to the corresponding sub-block decoder.
     pub fn addPacket(self: *Decoder, packet: base.EncodingPacket) !void {
         const sbn = packet.payload_id.source_block_number;
-        const n = self.num_sub_blocks;
+        const n: usize = self.config.num_sub_blocks;
 
         if (!self.blocks.contains(sbn)) {
             const kt = helpers.intDivCeil(
                 @intCast(self.config.transfer_length),
                 @as(u32, self.config.symbol_size),
             );
-            const z: u32 = self.config.num_source_blocks;
-            const part = base.partition(kt, z);
+            const part = base.partition(kt, @as(u32, self.config.num_source_blocks));
             const num_symbols: u32 = if (sbn < part.count_large) part.size_large else part.size_small;
 
             const decoders = try self.allocator.alloc(SourceBlockDecoder, n);
@@ -203,7 +200,7 @@ pub const Decoder = struct {
     /// Caller owns the returned slice.
     pub fn decode(self: *Decoder) !?[]u8 {
         const z: u32 = self.config.num_source_blocks;
-        const n = self.num_sub_blocks;
+        const n: usize = self.config.num_sub_blocks;
 
         if (self.blocks.count() < z) return null;
         {
@@ -255,12 +252,13 @@ pub const Decoder = struct {
                     decoded_count += 1;
                 }
 
-                for (0..k) |m| {
+                // Interleave: reassemble full symbols from sub-block results
+                for (0..k) |sym_idx| {
                     for (0..n) |j| {
                         const sub_size: usize = self.sub_block_partition.subSymbolSize(@intCast(j));
                         const copy_len = @min(sub_size, transfer_length - offset);
                         if (copy_len > 0) {
-                            @memcpy(result[offset .. offset + copy_len], sub_results[j][m].data[0..copy_len]);
+                            @memcpy(result[offset .. offset + copy_len], sub_results[j][sym_idx].data[0..copy_len]);
                             offset += copy_len;
                         }
                     }
