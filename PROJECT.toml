@@ -1,0 +1,7 @@
+[port]
+original = "cberner/raptorq"
+original_url = "https://github.com/cberner/raptorq"
+language = "rust"
+spec = "RFC 6330"
+type = "library"
+dependencies = "none"

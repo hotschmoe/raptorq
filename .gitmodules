@@ -1,0 +1,3 @@
+[submodule "test/fixtures/raptorq-reference"]
+	path = test/fixtures/raptorq-reference
+	url = https://github.com/cberner/raptorq

@@ -156,27 +156,40 @@ Key parameters from the RFC:
 - **N** - Number of sub-blocks per source block
 - **Al** - Symbol alignment (typically 4)
 
-#### Architecture (Planned)
+#### Architecture
+
+Layered from foundations (Layer 0) to public API (Layer 6). See `docs/discovery/ARCHITECTURE.md` for full dependency diagram.
 
 ```
 src/
-  root.zig           # Library entry point / public API
-  main.zig           # CLI/demo entry point
-  codec/
-    encoder.zig      # RaptorQ encoder
-    decoder.zig      # RaptorQ decoder
-  math/
-    gf256.zig        # GF(256) arithmetic (add, mul, div, exp, log)
-    matrix.zig       # Matrix operations over GF(256)
-    octets.zig       # Octet (symbol) operations
+  root.zig                          # Library entry point / public API re-exports
   tables/
-    systematic.zig   # Systematic index tables (Table 2, RFC 6330)
-    degree.zig       # Degree distribution table (Table 1, RFC 6330)
-    rand.zig         # Random number tables (V0, V1 from RFC 6330)
-  partition.zig      # Source block/sub-block partitioning
-  params.zig         # FEC Object Transmission Information (OTI)
-  constraints.zig    # Constraint matrix (A) construction (HDPC, LDPC, LT, PI)
-  rfc6330.zig        # Constants and helpers per the RFC spec
+    octet_tables.zig                # GF(256) exp/log tables (Layer 0)
+    rng_tables.zig                  # PRNG V0..V3 tables (Layer 0)
+    systematic_constants.zig        # RFC Table 2: K' -> J,S,H,W (Layer 0)
+  math/
+    octet.zig                       # GF(256) single-element arithmetic (Layer 1)
+    octets.zig                      # Bulk GF(256) slice operations (Layer 1)
+    gf2.zig                         # GF(2) binary bit operations (Layer 1)
+    rng.zig                         # RFC 5.5 PRNG + tuple generation (Layer 1)
+  codec/
+    base.zig                        # PayloadId, OTI, partition (Layer 2)
+    symbol.zig                      # Symbol with field arithmetic (Layer 2)
+    operation_vector.zig            # Deferred symbol operations (Layer 2)
+    encoder.zig                     # Encoder, SourceBlockEncoder (Layer 5)
+    decoder.zig                     # Decoder, SourceBlockDecoder (Layer 5)
+  matrix/
+    dense_binary_matrix.zig         # Bit-packed u64 matrix (Layer 3)
+    sparse_matrix.zig               # Hybrid sparse/dense (Layer 3)
+    octet_matrix.zig                # Dense GF(256) matrix (Layer 3)
+    constraint_matrix.zig           # RFC 5.3.3 construction (Layer 3)
+  solver/
+    pi_solver.zig                   # 5-phase inactivation decoding (Layer 4)
+    graph.zig                       # Connected components (Layer 4)
+  util/
+    sparse_vec.zig                  # Sparse binary vector
+    arraymap.zig                    # Specialized map types
+    helpers.zig                     # intDivCeil, isPrime, etc.
 ```
 
 #### Key Algorithms
@@ -190,9 +203,9 @@ src/
 #### Build and Test
 
 ```bash
-zig build                  # Build library + CLI
-zig build run              # Run CLI
-zig build test             # Run all tests
+zig build                  # Build library
+zig build test             # Run unit tests
+zig build test-conformance # Run conformance tests (RFC section coverage)
 
 # Cross-compile
 zig build -Dtarget=aarch64-linux-gnu
@@ -201,7 +214,7 @@ zig build -Dtarget=x86_64-windows-gnu
 
 #### Dependencies
 
-None yet. Pure Zig implementation with no external dependencies (by design -- RFC 6330 requires only GF(256) arithmetic and matrix operations).
+None. Pure Zig implementation with no external dependencies (by design -- RFC 6330 requires only GF(256) arithmetic and matrix operations).
 
 #### Reference Materials
 
