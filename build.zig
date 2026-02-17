@@ -48,4 +48,38 @@ pub fn build(b: *std.Build) void {
         const run_t = b.addRunArtifact(t);
         conformance_step.dependOn(&run_t.step);
     }
+
+    // Fuzz tests
+    const fuzz_step = b.step("test-fuzz", "Run fuzz tests");
+    const fuzz_files = [_][]const u8{"test/fuzz/test_fuzz.zig"};
+    for (fuzz_files) |test_file| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "raptorq", .module = mod },
+                },
+            }),
+        });
+        fuzz_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
+    // Interop tests (Rust-generated vectors)
+    const interop_step = b.step("test-interop", "Run interop tests against Rust-generated vectors");
+    const interop_files = [_][]const u8{"test/interop/test_interop.zig"};
+    for (interop_files) |test_file| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "raptorq", .module = mod },
+                },
+            }),
+        });
+        interop_step.dependOn(&b.addRunArtifact(t).step);
+    }
 }
