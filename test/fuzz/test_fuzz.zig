@@ -1,6 +1,4 @@
 // Fuzz tests for the raptorq encoder/decoder pipeline.
-// Exercises randomized parameters and data to catch edge cases that
-// deterministic conformance tests miss.
 
 const std = @import("std");
 const raptorq = @import("raptorq");
@@ -9,11 +7,9 @@ const Decoder = raptorq.Decoder;
 const PayloadId = raptorq.PayloadId;
 const OTI = raptorq.ObjectTransmissionInformation;
 
-// Valid symbol sizes that divide evenly by common alignments and keep
-// K' in a range where iterations are fast (<= 526 for 512-byte data).
 const SYMBOL_SIZES = [_]u16{ 1, 2, 4, 8, 12, 16, 20, 24, 32, 48, 64 };
 
-// Precomputed divisor tables for each symbol size (valid alignment values).
+// Precomputed divisors for each symbol size (valid alignment values).
 const DIVISORS = [_][]const u8{
     &.{1},                               // 1
     &.{ 1, 2 },                          // 2
@@ -35,8 +31,6 @@ const FuzzParams = struct {
     data: []const u8,
 };
 
-// Derive valid RaptorQ parameters from raw fuzz bytes.
-// Returns null if the input is too short to form a valid header.
 fn parseParams(input: []const u8) ?FuzzParams {
     if (input.len < 5) return null;
 
@@ -45,18 +39,15 @@ fn parseParams(input: []const u8) ?FuzzParams {
     const divisors = DIVISORS[sym_idx];
     const alignment = divisors[input[1] % divisors.len];
 
-    // num_sub_blocks must be in 1..symbol_size/alignment
     const t_al: u16 = symbol_size / @as(u16, alignment);
     const num_sub_blocks: u16 = (input[2] % t_al) + 1;
 
-    // data_length: u16 LE, clamped to 1..512
     const raw_len = @as(u16, input[3]) | (@as(u16, input[4]) << 8);
     const data_len: usize = @as(usize, (raw_len % 512)) + 1;
 
     const payload = input[5..];
     if (payload.len == 0) return null;
 
-    // Use available payload bytes, repeating if needed to fill data_len
     return .{
         .symbol_size = symbol_size,
         .alignment = alignment,
@@ -65,9 +56,7 @@ fn parseParams(input: []const u8) ?FuzzParams {
     };
 }
 
-// -- Test 1: Roundtrip (encode all symbols -> decode == original) --
-
-fn fuzzRoundtrip(_: @TypeOf({}), input: []const u8) anyerror!void {
+fn fuzzRoundtrip(_: void, input: []const u8) anyerror!void {
     const params = parseParams(input) orelse return;
     const allocator = std.testing.allocator;
 
@@ -83,19 +72,11 @@ fn fuzzRoundtrip(_: @TypeOf({}), input: []const u8) anyerror!void {
     var dec = try Decoder.init(allocator, enc.objectTransmissionInformation());
     defer dec.deinit();
 
-    const k = enc.sourceBlockK(0);
     const k_prime = enc.sub_encoders[0].k_prime;
 
-    // Send all K source symbols
+    // Send all K source symbols + K'-K repair symbols to cover padding
     var esi: u32 = 0;
-    while (esi < k) : (esi += 1) {
-        const pkt = try enc.encode(0, esi);
-        defer allocator.free(pkt.data);
-        try dec.addPacket(pkt);
-    }
-
-    // Send K'-K repair symbols to cover padding
-    while (esi < k + (k_prime - k)) : (esi += 1) {
+    while (esi < k_prime) : (esi += 1) {
         const pkt = try enc.encode(0, esi);
         defer allocator.free(pkt.data);
         try dec.addPacket(pkt);
@@ -110,14 +91,11 @@ test "fuzz_roundtrip" {
     try std.testing.fuzz({}, fuzzRoundtrip, .{});
 }
 
-// -- Test 2: Loss recovery (drop source symbols, compensate with repair) --
-
-fn fuzzLossRecovery(_: @TypeOf({}), input: []const u8) anyerror!void {
+fn fuzzLossRecovery(_: void, input: []const u8) anyerror!void {
     if (input.len < 7) return;
     const params = parseParams(input) orelse return;
     const allocator = std.testing.allocator;
 
-    // For loss tests, only use N=1 to keep iteration time reasonable
     var enc = try Encoder.init(allocator, params.data, params.symbol_size, 1, params.alignment);
     defer enc.deinit();
 
@@ -127,16 +105,10 @@ fn fuzzLossRecovery(_: @TypeOf({}), input: []const u8) anyerror!void {
     const k = enc.sourceBlockK(0);
     const k_prime = enc.sub_encoders[0].k_prime;
 
-    if (k < 2) {
-        // Cannot meaningfully test loss with a single symbol
-        return;
-    }
+    if (k < 2) return;
 
-    // Derive drop count from loss_seed (byte 5): drop 1..K/2 source symbols
     const max_drop = @max(1, k / 2);
     const drop_count: u32 = (input[5] % max_drop) + 1;
-
-    // Extra repair symbols beyond K' (byte 6): 0..3
     const extra_repair: u32 = if (input.len > 6) input[6] % 4 else 0;
 
     // Send source symbols, skipping the first drop_count
@@ -147,13 +119,12 @@ fn fuzzLossRecovery(_: @TypeOf({}), input: []const u8) anyerror!void {
         try dec.addPacket(pkt);
     }
 
-    // Send repair symbols to reach K' + extra_repair total
+    // Send repair symbols to compensate for dropped sources
     const received_source = k - drop_count;
     const repair_needed = (k_prime - received_source) + extra_repair;
-    esi = k;
     var sent: u32 = 0;
     while (sent < repair_needed) : (sent += 1) {
-        const pkt = try enc.encode(0, esi + sent);
+        const pkt = try enc.encode(0, k + sent);
         defer allocator.free(pkt.data);
         try dec.addPacket(pkt);
     }
@@ -167,25 +138,18 @@ test "fuzz_loss_recovery" {
     try std.testing.fuzz({}, fuzzLossRecovery, .{});
 }
 
-// -- Test 3: Serialization roundtrip (PayloadId + OTI) --
-
-fn fuzzSerialization(_: @TypeOf({}), input: []const u8) anyerror!void {
-    // PayloadId roundtrip: need 4 bytes
+fn fuzzSerialization(_: void, input: []const u8) anyerror!void {
     if (input.len >= 4) {
         const pid_bytes: [4]u8 = input[0..4].*;
         const pid = PayloadId.deserialize(pid_bytes);
-        const reserialized = pid.serialize();
-        try std.testing.expectEqual(pid_bytes, reserialized);
+        try std.testing.expectEqual(pid_bytes, pid.serialize());
     }
 
-    // OTI roundtrip: need 12 bytes
     if (input.len >= 12) {
         var oti_bytes: [12]u8 = input[0..12].*;
-        // Byte 5 is reserved and always serialized as 0
-        oti_bytes[5] = 0;
+        oti_bytes[5] = 0; // reserved byte always serialized as 0
         const oti = OTI.deserialize(oti_bytes);
-        const reserialized = oti.serialize();
-        try std.testing.expectEqual(oti_bytes, reserialized);
+        try std.testing.expectEqual(oti_bytes, oti.serialize());
     }
 }
 
@@ -193,14 +157,12 @@ test "fuzz_serialization" {
     try std.testing.fuzz({}, fuzzSerialization, .{});
 }
 
-// -- Test 4: Malformed decoder input (must not panic or corrupt memory) --
-
-fn fuzzMalformedInput(_: @TypeOf({}), input: []const u8) anyerror!void {
+fn fuzzMalformedInput(_: void, input: []const u8) anyerror!void {
     if (input.len < 6) return;
     const allocator = std.testing.allocator;
 
-    // Derive a valid OTI config from fuzz bytes
     const params = parseParams(input) orelse return;
+    const symbol_size: usize = @intCast(params.symbol_size);
 
     const config = OTI{
         .transfer_length = @intCast(params.data.len),
@@ -221,49 +183,35 @@ fn fuzzMalformedInput(_: @TypeOf({}), input: []const u8) anyerror!void {
         const esi_byte = remaining[offset + 1];
         offset += 2;
 
-        const pkt_len: usize = @min(
-            @as(usize, params.symbol_size),
-            remaining.len - offset,
-        );
+        const pkt_len = @min(symbol_size, remaining.len - offset);
         if (pkt_len == 0) break;
 
         const pkt_data = remaining[offset .. offset + pkt_len];
         offset += pkt_len;
 
-        // Only feed packets with SBN 0 (our config has 1 source block)
-        // and pad to symbol_size if needed
         if (sbn != 0) continue;
 
-        if (pkt_data.len == params.symbol_size) {
-            dec.addPacket(.{
-                .payload_id = .{
-                    .source_block_number = 0,
-                    .encoding_symbol_id = @as(u32, esi_byte),
-                },
-                .data = pkt_data,
-            }) catch continue;
-        } else {
-            // Pad short packets to full symbol size
-            const padded = allocator.alloc(u8, params.symbol_size) catch continue;
-            defer allocator.free(padded);
+        // Pad short packets to full symbol size
+        const data = if (pkt_data.len == symbol_size) pkt_data else blk: {
+            const padded = allocator.alloc(u8, symbol_size) catch continue;
             @memset(padded, 0);
             @memcpy(padded[0..pkt_data.len], pkt_data);
+            break :blk padded;
+        };
+        defer if (pkt_data.len != symbol_size) allocator.free(data);
 
-            dec.addPacket(.{
-                .payload_id = .{
-                    .source_block_number = 0,
-                    .encoding_symbol_id = @as(u32, esi_byte),
-                },
-                .data = padded,
-            }) catch continue;
-        }
+        dec.addPacket(.{
+            .payload_id = .{
+                .source_block_number = 0,
+                .encoding_symbol_id = @as(u32, esi_byte),
+            },
+            .data = data,
+        }) catch continue;
     }
 
-    // Attempt decode -- may fail (expected), but must not panic
+    // Attempt decode -- may fail, but must not panic
     if (dec.decode()) |maybe_result| {
-        if (maybe_result) |result| {
-            allocator.free(result);
-        }
+        if (maybe_result) |result| allocator.free(result);
     } else |_| {}
 }
 

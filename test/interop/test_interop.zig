@@ -40,7 +40,6 @@ fn verifyVector(comptime raw: []const u8) !void {
     const decoded = try decoder.decode() orelse return error.DecodeFailed;
     defer allocator.free(decoded);
 
-    try std.testing.expectEqual(source_data.len, decoded.len);
     try std.testing.expectEqualSlices(u8, source_data, decoded);
 }
 
