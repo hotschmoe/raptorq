@@ -80,10 +80,6 @@ const SWEEP_CASES = [_]SweepCase{
     .{ .T = 64, .Al = 32, .data_len = 1024 },
 };
 
-fn generateData(prng: *std.Random.Xoshiro256, buf: []u8) void {
-    prng.fill(buf);
-}
-
 // --- Core helpers (shared by sweep and fuzz tests) ---
 
 fn roundtripCore(allocator: std.mem.Allocator, data: []const u8, T: u16, N: u16, Al: u8) !void {
@@ -153,7 +149,7 @@ test "sweep_roundtrip" {
     for (SWEEP_CASES) |case| {
         const buf = try allocator.alloc(u8, case.data_len);
         defer allocator.free(buf);
-        generateData(&prng, buf);
+        prng.fill(buf);
 
         // N=1: single sub-block
         try roundtripCore(allocator, buf, case.T, 1, case.Al);
@@ -173,13 +169,13 @@ test "sweep_loss_recovery" {
     for (SWEEP_CASES) |case| {
         const buf = try allocator.alloc(u8, case.data_len);
         defer allocator.free(buf);
-        generateData(&prng, buf);
+        prng.fill(buf);
 
         // Pattern 1: drop 1 source symbol, 0 extra repair
         try lossRecoveryCore(allocator, buf, case.T, case.Al, 1, 0);
 
         // Pattern 2: drop ~25% of source symbols, 1 extra repair
-        const k_approx: u32 = @intCast((@as(usize, @max(case.data_len, 1)) + @as(usize, case.T) - 1) / @as(usize, case.T));
+        const k_approx: u32 = @intCast((@max(case.data_len, 1) + case.T - 1) / case.T);
         const drop25 = @max(1, k_approx / 4);
         try lossRecoveryCore(allocator, buf, case.T, case.Al, drop25, 1);
     }
@@ -300,7 +296,7 @@ fn fuzzLossRecovery(_: void, input: []const u8) anyerror!void {
     const params = parseParams(input) orelse return;
 
     const max_drop = @max(1, @as(u32, input[5]) % 128);
-    const extra_repair: u32 = if (input.len > 6) input[6] % 4 else 0;
+    const extra_repair: u32 = input[6] % 4;
 
     try lossRecoveryCore(std.testing.allocator, params.data, params.symbol_size, params.alignment, max_drop, extra_repair);
 }
