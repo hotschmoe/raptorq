@@ -11,72 +11,98 @@ const pi_solver = raptorq.pi_solver;
 const cm = raptorq.constraint_matrix;
 const sc = raptorq.systematic_constants;
 
-test "PI solver with identity system" {
+test "PI solver with K'=18 constraint matrix" {
     const allocator = std.testing.allocator;
 
-    // A = I(4): solving Ix = b gives x = b
-    var m = try OctetMatrix.identity(allocator, 4);
-    defer m.deinit();
+    // K'=18 is the smallest value where the old solver failed (SingularMatrix).
+    // Verifies inactivation decoding works beyond trivial sizes.
+    const kp: u32 = 18;
+    const si = sc.findSystematicIndex(kp).?;
+    const s: usize = @intCast(si.s);
+    const h: usize = @intCast(si.h);
+    const l: usize = @intCast(kp + si.s + si.h);
+    const sym_size: usize = 4;
 
-    var syms: [4]Symbol = undefined;
-    for (&syms, 0..) |*s, idx| {
-        s.* = try Symbol.init(allocator, 8);
-        for (s.data, 0..) |*d, j| d.* = @intCast((idx * 8 + j) % 256);
+    var a = try cm.buildConstraintMatrix(allocator, kp);
+    defer a.deinit();
+
+    const d = try allocator.alloc(Symbol, l);
+    var d_init: usize = 0;
+    defer {
+        for (d[0..d_init]) |sym| sym.deinit();
+        allocator.free(d);
     }
-    defer for (&syms) |s| s.deinit();
 
-    // Save expected values
-    var expected: [4][8]u8 = undefined;
-    for (&expected, 0..) |*e, idx| @memcpy(e, syms[idx].data);
+    for (0..s + h) |i| {
+        d[i] = try Symbol.init(allocator, sym_size);
+        d_init += 1;
+    }
+    for (0..kp) |i| {
+        d[s + h + i] = try Symbol.init(allocator, sym_size);
+        d_init += 1;
+        for (d[s + h + i].data, 0..) |*v, j| {
+            v.* = @intCast((i * sym_size + j + 1) % 256);
+        }
+    }
 
-    const result = try pi_solver.solve(allocator, &m, &syms, 4);
+    var source_copy: [18][4]u8 = undefined;
+    for (0..kp) |i| @memcpy(&source_copy[i], d[s + h + i].data);
+
+    const result = try pi_solver.solve(allocator, &a, d, kp);
     defer allocator.free(result.ops.ops);
 
-    for (0..4) |idx| {
-        try std.testing.expectEqualSlices(u8, &expected[idx], syms[idx].data);
+    // Verify: LT encoding of intermediate symbols regenerates source
+    for (0..kp) |i| {
+        var regenerated = try raptorq.encoder.ltEncode(allocator, kp, d, @intCast(i));
+        defer regenerated.deinit();
+        try std.testing.expectEqualSlices(u8, &source_copy[i], regenerated.data);
     }
 }
 
 test "PI solver with known small system" {
     const allocator = std.testing.allocator;
 
-    // 4x4 upper triangular system:
-    // [1 1 0 0]   [x0]   [a^b      ]
-    // [0 1 1 0] * [x1] = [b^c      ]
-    // [0 0 1 1]   [x2]   [c^d      ]
-    // [0 0 0 1]   [x3]   [d        ]
-    // Solution: x3=d, x2=c, x1=b, x0=a
-    var m = try OctetMatrix.init(allocator, 4, 4);
-    defer m.deinit();
-    m.set(0, 0, Octet.ONE);
-    m.set(0, 1, Octet.ONE);
-    m.set(1, 1, Octet.ONE);
-    m.set(1, 2, Octet.ONE);
-    m.set(2, 2, Octet.ONE);
-    m.set(2, 3, Octet.ONE);
-    m.set(3, 3, Octet.ONE);
+    // Use real constraint matrix for K'=10, solve, then verify
+    // intermediate symbols can regenerate source data via LT encoding.
+    const kp: u32 = 10;
+    const si = sc.findSystematicIndex(kp).?;
+    const s: usize = @intCast(si.s);
+    const h: usize = @intCast(si.h);
+    const l: usize = @intCast(kp + si.s + si.h);
+    const sym_size: usize = 1;
 
-    const a: u8 = 10;
-    const b: u8 = 20;
-    const c: u8 = 30;
-    const d: u8 = 40;
+    var a = try cm.buildConstraintMatrix(allocator, kp);
+    defer a.deinit();
 
-    var syms: [4]Symbol = undefined;
-    for (&syms) |*s| s.* = try Symbol.init(allocator, 1);
-    defer for (&syms) |s| s.deinit();
+    const d = try allocator.alloc(Symbol, l);
+    var d_init: usize = 0;
+    defer {
+        for (d[0..d_init]) |sym| sym.deinit();
+        allocator.free(d);
+    }
 
-    syms[0].data[0] = a ^ b;
-    syms[1].data[0] = b ^ c;
-    syms[2].data[0] = c ^ d;
-    syms[3].data[0] = d;
+    for (0..s + h) |i| {
+        d[i] = try Symbol.init(allocator, sym_size);
+        d_init += 1;
+    }
+    for (0..kp) |i| {
+        d[s + h + i] = try Symbol.init(allocator, sym_size);
+        d_init += 1;
+        d[s + h + i].data[0] = @intCast((i + 1) % 256);
+    }
 
-    const result = try pi_solver.solve(allocator, &m, &syms, 4);
+    var source_copy: [10]u8 = undefined;
+    for (0..kp) |i| source_copy[i] = d[s + h + i].data[0];
+
+    const result = try pi_solver.solve(allocator, &a, d, kp);
     defer allocator.free(result.ops.ops);
 
-    try std.testing.expectEqual(a, syms[0].data[0]);
-    try std.testing.expectEqual(b, syms[1].data[0]);
-    try std.testing.expectEqual(c, syms[2].data[0]);
-    try std.testing.expectEqual(d, syms[3].data[0]);
+    // Verify: LT encoding of intermediate symbols regenerates source
+    for (0..kp) |i| {
+        var regenerated = try raptorq.encoder.ltEncode(allocator, kp, d, @intCast(i));
+        defer regenerated.deinit();
+        try std.testing.expectEqual(source_copy[i], regenerated.data[0]);
+    }
 }
 
 test "PI solver repair symbol recovery" {
@@ -134,20 +160,32 @@ test "PI solver repair symbol recovery" {
 test "PI solver underdetermined detection" {
     const allocator = std.testing.allocator;
 
-    // Singular matrix: all-zero row makes system unsolvable
-    var m = try OctetMatrix.init(allocator, 3, 3);
+    // Use K'=10 constraint matrix with a zeroed column to make it singular
+    const kp: u32 = 10;
+    const si = sc.findSystematicIndex(kp).?;
+    const l: u32 = kp + si.s + si.h;
+
+    var m = try cm.buildConstraintMatrix(allocator, kp);
     defer m.deinit();
-    m.set(0, 0, Octet.ONE);
-    m.set(0, 1, Octet.init(2));
-    m.set(1, 0, Octet.init(3));
-    m.set(1, 1, Octet.init(4));
-    // Row 2 is all zeros -> singular
 
-    var syms: [3]Symbol = undefined;
-    for (&syms) |*s| s.* = try Symbol.init(allocator, 1);
-    defer for (&syms) |s| s.deinit();
+    // Zero out column 0 to make the system singular
+    var row: u32 = 0;
+    while (row < l) : (row += 1) {
+        m.set(row, 0, Octet.ZERO);
+    }
 
-    const result = pi_solver.solve(allocator, &m, &syms, 3);
+    const syms = try allocator.alloc(Symbol, l);
+    var init_count: usize = 0;
+    defer {
+        for (syms[0..init_count]) |s| s.deinit();
+        allocator.free(syms);
+    }
+    for (syms) |*s| {
+        s.* = try Symbol.init(allocator, 1);
+        init_count += 1;
+    }
+
+    const result = pi_solver.solve(allocator, &m, syms, kp);
     try std.testing.expectError(error.SingularMatrix, result);
 }
 

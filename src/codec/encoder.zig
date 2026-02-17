@@ -116,7 +116,7 @@ pub const SourceBlockEncoder = struct {
         var a = try constraint_matrix.buildConstraintMatrix(allocator, k_prime);
         defer a.deinit();
 
-        const result = try pi_solver.solve(allocator, &a, d, k);
+        const result = try pi_solver.solve(allocator, &a, d, k_prime);
         allocator.free(result.ops.ops);
 
         return .{

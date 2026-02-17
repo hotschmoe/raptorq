@@ -47,8 +47,10 @@ pub const SourceBlockDecoder = struct {
     }
 
     /// Returns true when enough symbols have been received to attempt decoding.
+    /// Padding symbols (K'-K zero symbols) are added automatically, so only
+    /// K received symbols are needed (not K').
     pub fn fullySpecified(self: SourceBlockDecoder) bool {
-        return self.received_symbols.count() >= systematic_constants.ceilKPrime(self.num_source_symbols);
+        return self.received_symbols.count() >= self.num_source_symbols;
     }
 
     /// Decode the source block, returning K source symbols.
@@ -65,7 +67,7 @@ pub const SourceBlockDecoder = struct {
         const isis = try self.allocator.alloc(u32, k_prime);
         defer self.allocator.free(isis);
 
-        // D vector: S+H zero constraint rows, K' received symbols
+        // D vector: S+H zero constraint rows, then K' symbol rows
         const d = try self.allocator.alloc(Symbol, l);
         var d_init: usize = 0;
         errdefer {
@@ -73,19 +75,29 @@ pub const SourceBlockDecoder = struct {
             self.allocator.free(d);
         }
 
+        // S+H zero constraint rows
         for (0..s + h) |i| {
             d[i] = try Symbol.init(self.allocator, sym_size);
             d_init += 1;
         }
 
-        var it = self.received_symbols.iterator();
+        // Collect received source symbols (ESI < K -> ISI = ESI)
         var count: usize = 0;
+        var it = self.received_symbols.iterator();
         while (it.next()) |entry| {
             if (count >= k_prime) break;
             const esi = entry.key_ptr.*;
-            // ESI-to-ISI mapping (RFC 5.3.1)
             isis[count] = if (esi < k) esi else k_prime + (esi - k);
             d[s + h + count] = try entry.value_ptr.clone();
+            d_init += 1;
+            count += 1;
+        }
+
+        // Add padding symbols (ISI = K..K'-1, zero data)
+        var pad: u32 = k;
+        while (pad < k_prime and count < k_prime) : (pad += 1) {
+            isis[count] = pad;
+            d[s + h + count] = try Symbol.init(self.allocator, sym_size);
             d_init += 1;
             count += 1;
         }
@@ -93,7 +105,7 @@ pub const SourceBlockDecoder = struct {
         var a = try constraint_matrix.buildDecodingMatrix(self.allocator, k_prime, isis[0..count]);
         defer a.deinit();
 
-        const result = try pi_solver.solve(self.allocator, &a, d, k);
+        const result = try pi_solver.solve(self.allocator, &a, d, k_prime);
         self.allocator.free(result.ops.ops);
 
         // Reconstruct source symbols 0..K-1 from intermediate symbols
