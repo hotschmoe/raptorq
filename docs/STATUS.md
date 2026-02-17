@@ -90,11 +90,14 @@ Separate `benchmark/` directory with reproducible, measurable scenarios.
 
 Goal: build and run on aarch64-freestanding (no OS, no libc).
 
-- [ ] **Cross-compile verification** - `zig build -Dtarget=aarch64-freestanding` must
-  compile clean. Identify and fix any implicit libc or OS dependencies.
-- [ ] **Allocator abstraction audit** - Verify all allocation goes through the injected
-  `std.mem.Allocator` interface. No global state, no static buffers, no thread-locals.
-- [ ] **No-std audit** - Audit imports for anything that pulls in OS-specific code
-  (std.fs, std.os, std.debug, std.io). Ensure the core library path is free of these.
+- [x] **Cross-compile verification** - `zig build -Dtarget=aarch64-freestanding` compiles
+  clean. No implicit libc or OS dependencies found. (2026-02-16)
+- [x] **Allocator abstraction audit** - All allocation goes through injected
+  `std.mem.Allocator`. No global state, no static buffers, no thread-locals. std types
+  used (ArrayList, AutoHashMap) all accept an allocator parameter. (2026-02-16)
+- [x] **No-std audit** - No std.fs, std.os, std.io, std.log, std.process, std.posix, or
+  std.Thread in production code. Only std.debug.assert (becomes @trap on freestanding),
+  std.mem, std.math.maxInt (comptime), std.ArrayList, std.AutoHashMap. std.testing is
+  confined to test blocks. (2026-02-16)
 - [ ] **Freestanding allocator example** - Provide or document a fixed-buffer allocator
   setup for embedded use (e.g. `std.heap.FixedBufferAllocator`).
