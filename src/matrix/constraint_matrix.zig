@@ -41,7 +41,7 @@ pub fn buildConstraintMatrices(allocator: std.mem.Allocator, k_prime: u32) !Cons
 
     generateLDPCBinary(&binary, k_prime, s);
     try generateHDPCSplit(allocator, &hdpc, k_prime, s, h);
-    generateLTBinary(&binary, k_prime, s, h, k_prime);
+    generateLTBinary(&binary, k_prime, s, k_prime);
 
     return .{ .binary = binary, .hdpc = hdpc, .s = s, .h = h, .l = l };
 }
@@ -62,7 +62,7 @@ pub fn buildDecodingMatrices(allocator: std.mem.Allocator, k_prime: u32, isis: [
 
     generateLDPCBinary(&binary, k_prime, s);
     try generateHDPCSplit(allocator, &hdpc, k_prime, s, h);
-    generateLTRowsBinary(&binary, k_prime, s, h, isis);
+    generateLTRowsBinary(&binary, k_prime, s, isis);
 
     return .{ .binary = binary, .hdpc = hdpc, .s = s, .h = h, .l = l };
 }
@@ -151,8 +151,7 @@ fn generateHDPCSplit(allocator: std.mem.Allocator, hdpc: *OctetMatrix, k_prime: 
 }
 
 /// LT rows for sequential ISIs, written into DenseBinaryMatrix at rows S..S+num_symbols-1.
-fn generateLTBinary(binary: *DenseBinaryMatrix, k_prime: u32, s: u32, h: u32, num_symbols: u32) void {
-    _ = h;
+fn generateLTBinary(binary: *DenseBinaryMatrix, k_prime: u32, s: u32, num_symbols: u32) void {
     const params = ltParams(k_prime, s);
     var x: u32 = 0;
     while (x < num_symbols) : (x += 1) {
@@ -161,8 +160,7 @@ fn generateLTBinary(binary: *DenseBinaryMatrix, k_prime: u32, s: u32, h: u32, nu
 }
 
 /// LT rows for arbitrary ISIs, written into DenseBinaryMatrix at rows S..S+isis.len-1.
-fn generateLTRowsBinary(binary: *DenseBinaryMatrix, k_prime: u32, s: u32, h: u32, isis: []const u32) void {
-    _ = h;
+fn generateLTRowsBinary(binary: *DenseBinaryMatrix, k_prime: u32, s: u32, isis: []const u32) void {
     const params = ltParams(k_prime, s);
     for (isis, 0..) |isi, x| {
         writeLTRowBinary(binary, k_prime, s + @as(u32, @intCast(x)), isi, params);

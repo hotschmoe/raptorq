@@ -14,9 +14,7 @@ const Octet = @import("../math/octet.zig").Octet;
 const OctetMatrix = @import("../matrix/octet_matrix.zig").OctetMatrix;
 const DenseBinaryMatrix = @import("../matrix/dense_binary_matrix.zig").DenseBinaryMatrix;
 const ConstraintMatrices = @import("../matrix/constraint_matrix.zig").ConstraintMatrices;
-const symbol_mod = @import("../codec/symbol.zig");
-const Symbol = symbol_mod.Symbol;
-const SymbolBuffer = symbol_mod.SymbolBuffer;
+const SymbolBuffer = @import("../codec/symbol.zig").SymbolBuffer;
 const OperationVector = @import("../codec/operation_vector.zig").OperationVector;
 const SymbolOp = @import("../codec/operation_vector.zig").SymbolOp;
 const ConnectedComponentGraph = @import("graph.zig").ConnectedComponentGraph;
@@ -124,12 +122,9 @@ const SolverState = struct {
         if (r1 == r2) return;
         if (r1 < self.hdpc_start and r2 < self.hdpc_start) {
             // O(1) via indirection -- no physical data movement
-            const p1 = self.log_to_phys[r1];
-            const p2 = self.log_to_phys[r2];
-            self.log_to_phys[r1] = p2;
-            self.log_to_phys[r2] = p1;
-            self.phys_to_log[p1] = r2;
-            self.phys_to_log[p2] = r1;
+            self.phys_to_log[self.log_to_phys[r1]] = r2;
+            self.phys_to_log[self.log_to_phys[r2]] = r1;
+            std.mem.swap(u32, &self.log_to_phys[r1], &self.log_to_phys[r2]);
             std.mem.swap(u16, &self.v_degree[r1], &self.v_degree[r2]);
         } else if (r1 >= self.hdpc_start and r2 >= self.hdpc_start) {
             self.hdpc.swapRows(r1 - self.hdpc_start, r2 - self.hdpc_start);
@@ -159,21 +154,12 @@ const SolverState = struct {
         self.v_degree[bin_log] = @intCast(self.binary.countOnesInRange(bin_phys, v_start, v_end));
     }
 
-    // Access helpers through indirection layer
     inline fn binaryGet(self: *const SolverState, logical_row: u32, col: u32) bool {
         return self.binary.get(self.log_to_phys[logical_row], col);
     }
 
-    inline fn binaryRowSliceConst(self: *const SolverState, logical_row: u32) []const u64 {
-        return self.binary.rowSliceConst(self.log_to_phys[logical_row]);
-    }
-
     inline fn binaryXorRowRange(self: *SolverState, src_log: u32, dst_log: u32, start_col: u32) void {
         self.binary.xorRowRange(self.log_to_phys[src_log], self.log_to_phys[dst_log], start_col);
-    }
-
-    inline fn binaryCountOnesInRange(self: *const SolverState, logical_row: u32, start: u32, end: u32) u32 {
-        return self.binary.countOnesInRange(self.log_to_phys[logical_row], start, end);
     }
 
     inline fn binaryNonzeroColsInRange(self: *const SolverState, logical_row: u32, start: u32, end: u32, buf: []u32) u32 {
@@ -245,8 +231,7 @@ pub fn solve(
         const p3 = t[3].since(t[2]);
         const ap = t[4].since(t[3]);
         const total = t[4].since(t[0]);
-        const w = std.fs.File.stderr().deprecatedWriter();
-        w.print("[pi_solver K'={d} L={d}] phase1={d}us phase2={d}us phase3={d}us apply={d}us total={d}us i={d} u={d}\n", .{
+        std.debug.print("[pi_solver K'={d} L={d}] phase1={d}us phase2={d}us phase3={d}us apply={d}us total={d}us i={d} u={d}\n", .{
             k_prime,
             state.l,
             p1 / 1000,
@@ -256,7 +241,7 @@ pub fn solve(
             total / 1000,
             state.i,
             state.u,
-        }) catch {};
+        });
     }
 }
 
@@ -342,7 +327,7 @@ fn selectPivotRow(state: *SolverState, hdpc_start: u32) SolverError!PivotSelecti
 
 fn eliminateColumn(state: *SolverState, col: u32, hdpc_start: u32) SolverError!void {
     const pivot_phys = state.log_to_phys[col];
-    const v_start = col; // after this pivot is processed, V starts at col+1
+    const v_start = col;
     const v_end = state.l - state.u;
 
     var row = col + 1;
@@ -369,13 +354,6 @@ fn eliminateColumn(state: *SolverState, col: u32, hdpc_start: u32) SolverError!v
             } });
         }
     }
-
-    // After pivot column is used, it leaves V. Decrement v_degree for rows
-    // that have a 1 in this column (they were just XOR'd, so only pivot has it).
-    // Actually, the pivot row itself moves to the diagonal, and all other rows
-    // had col zeroed by the XOR. But v_degree already accounts for col being
-    // in [v_start, v_end). Since i advances after this call, col leaves V
-    // naturally. We account for this in phase1 by noting i increments.
 
     const pivot_row_data = state.binary.rowSliceConst(pivot_phys);
     const h = state.l - hdpc_start;

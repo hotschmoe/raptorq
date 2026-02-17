@@ -205,11 +205,6 @@ pub fn fmaSlice(dst: []u8, src: []const u8, scalar: Octet) void {
     }
 }
 
-/// Set all bytes to zero.
-pub fn zero(dst: []u8) void {
-    @memset(dst, 0);
-}
-
 test "addAssign across sizes" {
     const sizes = [_]usize{ 0, 1, 7, 15, 16, 17, 31, 32, 64, 100, 1024 };
     for (sizes) |size| {

@@ -2,8 +2,7 @@
 
 const std = @import("std");
 const base = @import("base.zig");
-const symbol_mod = @import("symbol.zig");
-const SymbolBuffer = symbol_mod.SymbolBuffer;
+const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
 const pi_solver = @import("../solver/pi_solver.zig");
@@ -67,9 +66,8 @@ pub const SourceBlockDecoder = struct {
         const isis = try self.allocator.alloc(u32, k_prime);
         defer self.allocator.free(isis);
 
-        // D vector as contiguous SymbolBuffer
         var d = try SymbolBuffer.init(self.allocator, l, sym_size);
-        errdefer d.deinit();
+        defer d.deinit();
 
         // Collect received symbols
         var count: usize = 0;
@@ -105,7 +103,6 @@ pub const SourceBlockDecoder = struct {
             @memcpy(result[i * sym_size ..][0..sym_size], sym_data);
         }
 
-        d.deinit();
         return result;
     }
 };
@@ -121,9 +118,9 @@ pub const Decoder = struct {
         config: base.ObjectTransmissionInformation,
     ) !Decoder {
         const sbp = try base.SubBlockPartition.init(
-            @as(u32, config.symbol_size),
-            @as(u32, config.num_sub_blocks),
-            @as(u32, config.alignment),
+            config.symbol_size,
+            config.num_sub_blocks,
+            config.alignment,
         );
         return .{
             .config = config,
@@ -149,9 +146,9 @@ pub const Decoder = struct {
         if (!self.blocks.contains(sbn)) {
             const kt = helpers.intDivCeil(
                 @intCast(self.config.transfer_length),
-                @as(u32, self.config.symbol_size),
+                self.config.symbol_size,
             );
-            const part = base.partition(kt, @as(u32, self.config.num_source_blocks));
+            const part = base.partition(kt, self.config.num_source_blocks);
             const num_symbols: u32 = if (sbn < part.count_large) part.size_large else part.size_small;
 
             const decoders = try self.allocator.alloc(SourceBlockDecoder, n);

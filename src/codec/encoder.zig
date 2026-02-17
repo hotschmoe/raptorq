@@ -2,8 +2,7 @@
 
 const std = @import("std");
 const base = @import("base.zig");
-const symbol_mod = @import("symbol.zig");
-const SymbolBuffer = symbol_mod.SymbolBuffer;
+const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
 const pi_solver = @import("../solver/pi_solver.zig");
@@ -157,9 +156,8 @@ pub const Encoder = struct {
         alignment: u8,
     ) !Encoder {
         const t: u32 = symbol_size;
-        const al: u32 = alignment;
-        const n: usize = @intCast(num_sub_blocks);
-        const sbp = try base.SubBlockPartition.init(t, @intCast(num_sub_blocks), al);
+        const n: usize = num_sub_blocks;
+        const sbp = try base.SubBlockPartition.init(t, num_sub_blocks, alignment);
 
         const kt = helpers.intDivCeil(@intCast(data.len), t);
         const z: u32 = @max(1, helpers.intDivCeil(kt, 56403));

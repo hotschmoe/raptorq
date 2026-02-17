@@ -4,6 +4,20 @@ Date: 2026-02-17
 Baseline: commit 9e9b5a3 (dev-hotschmoe)
 Target: Match or beat cberner/raptorq v2.0 throughput
 
+## Implementation Status
+
+| Item | Description                          | Status    |
+|------|--------------------------------------|-----------|
+| 1    | Contiguous SymbolBuffer              | DONE      |
+| 2    | Incremental v_degree tracking        | DONE      |
+| 3    | Logical row indirection              | DONE      |
+| 4    | Direct binary matrix construction    | DONE      |
+| 5    | Widen SIMD to 256-bit (AVX2)        | Remaining |
+
+Items 1-4 implemented in commits 047f3f8 and prior. Reduced gap from ~5-6x to ~2.5-4x (encode) and ~3-5x (decode).
+
+Remaining work: Item 5 (SIMD widening) plus columnar index for Phase 1 elimination.
+
 ## Current Benchmark Results
 
 Both benchmarks: identical parameters, same data sizes, symbol sizes, 10% loss,
@@ -155,7 +169,7 @@ This doubles SIMD throughput for all symbol operations.
 
 ## Implementation Items
 
-### Item 1: Contiguous symbol buffer
+### Item 1: Contiguous symbol buffer [DONE]
 
 Replace per-symbol allocations with a single contiguous buffer.
 
@@ -179,7 +193,7 @@ Changes needed:
   - decoder.zig SourceBlockDecoder uses SymbolBuffer for D vector
   - ltEncode uses SymbolBuffer for intermediate symbol reads
 
-### Item 2: Columnar index + incremental degree tracking
+### Item 2: Incremental degree tracking [DONE] (columnar index deferred)
 
 Add to SolverState:
 
@@ -197,7 +211,7 @@ selectPivotRow scans row_degree[] (O(R) u16 comparisons, no popcount).
 graphSubstep reads col_index to build edges directly.
 eliminateColumn iterates col_index[col] instead of scanning all rows.
 
-### Item 3: Logical row indirection
+### Item 3: Logical row indirection [DONE]
 
 Add to SolverState:
 
@@ -213,7 +227,7 @@ All matrix access goes through indirection:
 DenseBinaryMatrix methods that take row indices now receive physical indices.
 The indirection is applied at the SolverState level.
 
-### Item 4: Direct binary matrix construction
+### Item 4: Direct binary matrix construction [DONE]
 
 Split buildConstraintMatrix into two functions:
 
