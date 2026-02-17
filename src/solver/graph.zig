@@ -1,134 +1,194 @@
-// Connected component tracking for PI solver Phase 1
+// Union-find based connected component graph for PI solver Phase 1.
+// Allocated once per solve, reset() between iterations (no alloc/dealloc per r=2 step).
 
 const std = @import("std");
 
-pub const Graph = struct {
-    num_nodes: u32,
-    adjacency: []std.ArrayList(u32),
-    allocator: std.mem.Allocator,
+pub const ConnectedComponentGraph = struct {
+    // Union-find parent array. parent[i] == i means i is a root.
+    // Initialized to sentinel (maxInt) meaning "unassigned".
+    parent: []u32,
+    rank: []u16,
+    component_size: []u32,
+    max_nodes: u32,
+    // Track which nodes are active so reset() only touches used entries
+    active_nodes: []u32,
+    num_active: u32,
 
-    pub fn init(allocator: std.mem.Allocator, num_nodes: u32) !Graph {
-        const adj = try allocator.alloc(std.ArrayList(u32), num_nodes);
-        for (adj) |*list| {
-            list.* = .empty;
-        }
+    const UNASSIGNED: u32 = std.math.maxInt(u32);
+
+    pub fn init(allocator: std.mem.Allocator, max_nodes: u32) !ConnectedComponentGraph {
+        const parent = try allocator.alloc(u32, max_nodes);
+        errdefer allocator.free(parent);
+        const rank = try allocator.alloc(u16, max_nodes);
+        errdefer allocator.free(rank);
+        const comp_size = try allocator.alloc(u32, max_nodes);
+        errdefer allocator.free(comp_size);
+        const active = try allocator.alloc(u32, max_nodes);
+        errdefer allocator.free(active);
+
+        @memset(parent, UNASSIGNED);
+        @memset(rank, 0);
+        @memset(comp_size, 0);
+
         return .{
-            .num_nodes = num_nodes,
-            .adjacency = adj,
-            .allocator = allocator,
+            .parent = parent,
+            .rank = rank,
+            .component_size = comp_size,
+            .max_nodes = max_nodes,
+            .active_nodes = active,
+            .num_active = 0,
         };
     }
 
-    pub fn deinit(self: *Graph) void {
-        for (self.adjacency) |*list| {
-            list.deinit(self.allocator);
-        }
-        self.allocator.free(self.adjacency);
+    pub fn deinit(self: *ConnectedComponentGraph, allocator: std.mem.Allocator) void {
+        allocator.free(self.parent);
+        allocator.free(self.rank);
+        allocator.free(self.component_size);
+        allocator.free(self.active_nodes);
     }
 
-    pub fn addEdge(self: *Graph, u: u32, v: u32) !void {
-        try self.adjacency[u].append(self.allocator, v);
-        if (u != v) {
-            try self.adjacency[v].append(self.allocator, u);
+    pub fn reset(self: *ConnectedComponentGraph) void {
+        for (self.active_nodes[0..self.num_active]) |node| {
+            self.parent[node] = UNASSIGNED;
+            self.rank[node] = 0;
+            self.component_size[node] = 0;
+        }
+        self.num_active = 0;
+    }
+
+    fn ensureNode(self: *ConnectedComponentGraph, node: u32) void {
+        if (self.parent[node] == UNASSIGNED) {
+            self.parent[node] = node;
+            self.component_size[node] = 1;
+            self.active_nodes[self.num_active] = node;
+            self.num_active += 1;
         }
     }
 
-    pub fn connectedComponents(self: *Graph, allocator: std.mem.Allocator) ![]u32 {
-        const sentinel = std.math.maxInt(u32);
-        const labels = try allocator.alloc(u32, self.num_nodes);
-        @memset(labels, sentinel);
+    fn find(self: *ConnectedComponentGraph, node: u32) u32 {
+        var x = node;
+        while (self.parent[x] != x) {
+            // Path splitting: make each node point to its grandparent
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
+        return x;
+    }
 
-        var queue: std.ArrayList(u32) = .empty;
-        defer queue.deinit(allocator);
+    pub fn addEdge(self: *ConnectedComponentGraph, u: u32, v: u32) void {
+        self.ensureNode(u);
+        self.ensureNode(v);
 
-        var component_id: u32 = 0;
-        var node: u32 = 0;
-        while (node < self.num_nodes) : (node += 1) {
-            if (labels[node] != sentinel) continue;
+        const root_u = self.find(u);
+        const root_v = self.find(v);
+        if (root_u == root_v) return;
 
-            labels[node] = component_id;
-            queue.clearRetainingCapacity();
-            try queue.append(allocator, node);
+        // Union by rank, merge smaller into larger
+        const total_size = self.component_size[root_u] + self.component_size[root_v];
+        if (self.rank[root_u] < self.rank[root_v]) {
+            self.parent[root_u] = root_v;
+            self.component_size[root_v] = total_size;
+        } else if (self.rank[root_u] > self.rank[root_v]) {
+            self.parent[root_v] = root_u;
+            self.component_size[root_u] = total_size;
+        } else {
+            self.parent[root_v] = root_u;
+            self.component_size[root_u] = total_size;
+            self.rank[root_u] += 1;
+        }
+    }
 
-            var head: usize = 0;
-            while (head < queue.items.len) {
-                const current = queue.items[head];
-                head += 1;
-                for (self.adjacency[current].items) |neighbor| {
-                    if (labels[neighbor] == sentinel) {
-                        labels[neighbor] = component_id;
-                        try queue.append(allocator, neighbor);
-                    }
-                }
+    /// Find a node in [start, end) that belongs to the largest component.
+    /// Returns null if no active nodes exist in the range.
+    pub fn getNodeInLargestComponent(self: *ConnectedComponentGraph, start: u32, end: u32) ?u32 {
+        var best_node: ?u32 = null;
+        var best_size: u32 = 0;
+
+        for (self.active_nodes[0..self.num_active]) |node| {
+            if (node < start or node >= end) continue;
+            const root = self.find(node);
+            const sz = self.component_size[root];
+            if (sz > best_size) {
+                best_size = sz;
+                best_node = node;
             }
-
-            component_id += 1;
         }
 
-        return labels;
-    }
-
-    pub fn numComponents(self: *Graph, allocator: std.mem.Allocator) !u32 {
-        const labels = try self.connectedComponents(allocator);
-        defer allocator.free(labels);
-
-        if (labels.len == 0) return 0;
-
-        var max_label: u32 = 0;
-        for (labels) |l| {
-            if (l > max_label) max_label = l;
-        }
-        return max_label + 1;
+        return best_node;
     }
 };
 
-test "Graph single component" {
-    var g = try Graph.init(std.testing.allocator, 4);
-    defer g.deinit();
+test "ConnectedComponentGraph single component" {
+    var g = try ConnectedComponentGraph.init(std.testing.allocator, 4);
+    defer g.deinit(std.testing.allocator);
 
-    try g.addEdge(0, 1);
-    try g.addEdge(1, 2);
-    try g.addEdge(2, 3);
+    g.addEdge(0, 1);
+    g.addEdge(1, 2);
+    g.addEdge(2, 3);
 
-    const nc = try g.numComponents(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 1), nc);
+    // All 4 nodes in one component
+    const root = g.find(0);
+    try std.testing.expectEqual(g.find(1), root);
+    try std.testing.expectEqual(g.find(2), root);
+    try std.testing.expectEqual(g.find(3), root);
+    try std.testing.expectEqual(@as(u32, 4), g.component_size[root]);
 }
 
-test "Graph multiple components" {
-    var g = try Graph.init(std.testing.allocator, 6);
-    defer g.deinit();
+test "ConnectedComponentGraph multiple components" {
+    var g = try ConnectedComponentGraph.init(std.testing.allocator, 6);
+    defer g.deinit(std.testing.allocator);
 
-    try g.addEdge(0, 1);
-    try g.addEdge(2, 3);
-    try g.addEdge(4, 5);
+    g.addEdge(0, 1);
+    g.addEdge(2, 3);
+    g.addEdge(4, 5);
 
-    const nc = try g.numComponents(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 3), nc);
+    try std.testing.expect(g.find(0) != g.find(2));
+    try std.testing.expect(g.find(2) != g.find(4));
+    try std.testing.expect(g.find(0) != g.find(4));
 }
 
-test "Graph connected components labels" {
-    var g = try Graph.init(std.testing.allocator, 5);
-    defer g.deinit();
+test "ConnectedComponentGraph reset" {
+    var g = try ConnectedComponentGraph.init(std.testing.allocator, 4);
+    defer g.deinit(std.testing.allocator);
 
-    try g.addEdge(0, 1);
-    try g.addEdge(3, 4);
+    g.addEdge(0, 1);
+    g.addEdge(2, 3);
+    try std.testing.expectEqual(@as(u32, 4), g.num_active);
 
-    const labels = try g.connectedComponents(std.testing.allocator);
-    defer std.testing.allocator.free(labels);
+    g.reset();
+    try std.testing.expectEqual(@as(u32, 0), g.num_active);
+    try std.testing.expectEqual(ConnectedComponentGraph.UNASSIGNED, g.parent[0]);
 
-    try std.testing.expectEqual(labels[0], labels[1]);
-    try std.testing.expect(labels[0] != labels[2]);
-    try std.testing.expect(labels[2] != labels[3]);
-    try std.testing.expectEqual(labels[3], labels[4]);
+    // Can reuse after reset
+    g.addEdge(0, 3);
+    try std.testing.expectEqual(g.find(0), g.find(3));
 }
 
-test "Graph self-loop" {
-    var g = try Graph.init(std.testing.allocator, 3);
-    defer g.deinit();
+test "ConnectedComponentGraph getNodeInLargestComponent" {
+    var g = try ConnectedComponentGraph.init(std.testing.allocator, 10);
+    defer g.deinit(std.testing.allocator);
 
-    try g.addEdge(0, 0);
-    try g.addEdge(1, 2);
+    // Component 1: {2, 5, 7} (size 3)
+    g.addEdge(2, 5);
+    g.addEdge(5, 7);
+    // Component 2: {3, 8} (size 2)
+    g.addEdge(3, 8);
 
-    const nc = try g.numComponents(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 2), nc);
+    const node = g.getNodeInLargestComponent(0, 10);
+    try std.testing.expect(node != null);
+    // Should be in the {2, 5, 7} component
+    const root = g.find(node.?);
+    try std.testing.expectEqual(g.find(2), root);
+}
+
+test "ConnectedComponentGraph self-loop" {
+    var g = try ConnectedComponentGraph.init(std.testing.allocator, 3);
+    defer g.deinit(std.testing.allocator);
+
+    g.addEdge(0, 0);
+    g.addEdge(1, 2);
+
+    try std.testing.expect(g.find(0) != g.find(1));
+    try std.testing.expectEqual(@as(u32, 1), g.component_size[g.find(0)]);
+    try std.testing.expectEqual(@as(u32, 2), g.component_size[g.find(1)]);
 }
