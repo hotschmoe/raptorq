@@ -216,29 +216,76 @@ swapRows becomes O(1) instead of O(L).
 Expected impact: moderate reduction in Phase 1 and Phase 2 row swap overhead.
 
 
-## Existing Assets
+## Implementation Status (2026-02-17)
 
-We already have building blocks that are currently unused in the solver:
+P0-P3 implemented in a single commit. The PI solver now uses:
 
-- `src/matrix/dense_binary_matrix.zig` -- bit-packed u64 matrix with get/set/xorRow/swapRows
-- `src/matrix/sparse_matrix.zig` -- hybrid sparse/dense binary matrix
-- `src/math/gf2.zig` -- bit-level operations (getBit, setBit, xorSlice, popcount)
+- **DenseBinaryMatrix** (u64 bit-packed) for all non-HDPC rows (L-H rows)
+- **OctetMatrix** (GF(256)) for HDPC rows only (H rows, typically 10-20)
+- **ConnectedComponentGraph** with union-find (reset between iterations, no alloc churn)
+- **Partial row XOR** (xorRowRange) for Errata 11 elimination optimization
+- **start_row hint** for column swaps (skip resolved rows)
+- **Set-bit iteration** via @ctz for HDPC FMA (avoids full GF(256) row multiply)
 
-The DenseBinaryMatrix already supports the core operations needed for P0. The main work
-is restructuring the solver to use it instead of OctetMatrix for binary rows, and
-managing the HDPC rows separately.
 
+## Post-Optimization Results
 
-## Target Performance
-
-After P0-P2 implementation, realistic targets based on the Rust comparison:
+### Solver Profiling (ReleaseFast, single encode pass)
 
 ```
-Current best (K~512):   ~20 MB/s encode, ~21 MB/s decode
-Target (K~512):         ~100-200 MB/s encode, ~100-200 MB/s decode
-Rust reference (K~512): ~247 MB/s encode, ~268 MB/s decode
+Case           K'     L     Phase1      Phase2    Phase3    Apply    Total    P1%
+1 KB           18     39    19us        20us      0us       13us     54us     35%
+10 KB          160    193   194us       132us     12us      75us     415us    47%
+64 KB          1032   1101  6,482us     1,405us   1,117us   690us    9,695us  67%
+128 KB         526    577   2,674us     501us     128us     537us    3,841us  70%
+256 KB         1032   1101  6,190us     1,386us   482us     1,328us  9,387us  66%
+512 KB         526    577   1,412us     552us     147us     1,654us  3,766us  37%
+1 MB           1032   1101  6,286us     2,912us   490us     3,864us  13,553us 46%
+4 MB           2070   2170  37,190us    3,454us   1,982us   19,818us 62,445us 60%
+10 MB          2565   2673  65,191us    5,030us   3,067us   45,489us 118,779us 55%
 ```
 
-Reaching parity with Rust is achievable but will require all optimizations through P4
-plus potential AVX2 (256-bit) SIMD for GF(256) bulk operations (we currently use 128-bit
-SSSE3).
+Phase 1 improvement vs pre-optimization baseline:
+
+```
+K'=1032 (L=1101): 85ms -> 6.2ms   (13.7x faster)
+K'=2070 (L=2170): 574ms -> 37ms   (15.5x faster)
+K'=2565 (L=2673): 979ms -> 65ms   (15.1x faster)
+```
+
+Phase 1 is no longer the dominant bottleneck for large symbol sizes (apply/remap
+takes over due to O(L*T) symbol copy cost).
+
+### Benchmark Throughput (ReleaseFast, 10% loss)
+
+```
+Size     | T    | Zig Enc | Rust Enc | Ratio  | Zig Dec | Rust Dec | Ratio
+---------|------|---------|----------|--------|---------|----------|------
+256 B    | 64   |     1.8 |      9.3 |    5x  |     1.5 |     11.3 |   8x
+1 KB     | 64   |     4.1 |     22.2 |    5x  |     4.1 |     26.0 |   6x
+10 KB    | 64   |     6.1 |     22.4 |    4x  |     5.8 |     25.6 |   4x
+64 KB    | 64   |     3.2 |     22.3 |    7x  |     3.0 |     25.5 |   9x
+128 KB   | 256  |    16.8 |     84.4 |    5x  |    15.7 |     96.9 |   6x
+256 KB   | 256  |    11.6 |     81.5 |    7x  |    11.7 |     92.0 |   8x
+512 KB   | 1024 |    59.1 |    247.3 |    4x  |    52.0 |    268.5 |   5x
+1 MB     | 1024 |    40.5 |    231.3 |    6x  |    38.1 |    246.1 |   6x
+2 MB     | 2048 |    72.2 |    350.1 |    5x  |    67.6 |    305.4 |   5x
+4 MB     | 2048 |    45.1 |    310.8 |    7x  |    43.7 |    260.1 |   6x
+10 MB    | 4096 |    67.2 |    325.9 |    5x  |    63.6 |    311.4 |   5x
+                                                         (MB/s -- higher is better)
+```
+
+Gap narrowed from 9-48x to 4-9x. Largest improvements at high K' where Phase 1
+was the bottleneck.
+
+
+## Remaining Optimization Opportunities
+
+- **P4: Logical row indirection** - Track row permutations via index arrays instead
+  of physically swapping row data. swapRows becomes O(1) instead of O(L).
+- **Memory layout optimization** - Cache-friendly data layout, minimize allocator
+  pressure in hot paths.
+- **Phase 2 optimization** - Phase 2 now consumes a larger fraction of total time.
+  Consider optimized GF(256) GE for the small inactivated submatrix.
+- **Apply/remap optimization** - Symbol copy/permutation is significant at large T.
+  Consider in-place permutation or swap-based remap.

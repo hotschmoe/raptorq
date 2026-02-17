@@ -38,37 +38,24 @@ pub fn countOnesInRange(data: []const u64, start_bit: u32, end_bit: u32) u32 {
     if (start_bit >= end_bit) return 0;
     const first_word = start_bit / 64;
     const last_word = (end_bit - 1) / 64;
-
-    if (first_word == last_word) {
-        const mask = rangeMask(start_bit % 64, end_bit - first_word * 64);
-        return @popCount(data[first_word] & mask);
-    }
-
     var count: u32 = 0;
 
-    // First partial word
-    const first_bit: u6 = @intCast(start_bit % 64);
-    count += @popCount(data[first_word] & (@as(u64, std.math.maxInt(u64)) << first_bit));
-
-    // Full words in the middle
-    var w = first_word + 1;
-    while (w < last_word) : (w += 1) {
-        count += @popCount(data[w]);
+    if (first_word == last_word) {
+        return @popCount(data[first_word] & wordMask(start_bit % 64, end_bit - first_word * 64));
     }
 
-    // Last partial word
-    const end_mod: u7 = @intCast(end_bit - last_word * 64);
-    if (end_mod == 64) {
-        count += @popCount(data[last_word]);
-    } else {
-        count += @popCount(data[last_word] & ((@as(u64, 1) << @intCast(end_mod)) - 1));
+    count += @popCount(data[first_word] & wordMask(start_bit % 64, 64));
+    for (data[first_word + 1 .. last_word]) |word| {
+        count += @popCount(word);
     }
+    count += @popCount(data[last_word] & wordMask(0, end_bit - last_word * 64));
 
     return count;
 }
 
-/// Build a bitmask for bits [start, end) within a single word.
-fn rangeMask(start: u32, end: u32) u64 {
+/// Build a bitmask for bits [start, end) within a single u64 word.
+/// start and end are bit positions within the word (0..64).
+fn wordMask(start: u32, end: u32) u64 {
     const high: u64 = if (end >= 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(end)) - 1;
     const low: u64 = if (start == 0) 0 else (@as(u64, 1) << @intCast(start)) - 1;
     return high & ~low;
@@ -79,17 +66,13 @@ pub fn xorSliceFrom(dst: []u64, src: []const u64, start_col: u32) void {
     const first_word = start_col / 64;
     if (first_word >= dst.len) return;
 
-    // First partial word: mask off bits below start_col
     const first_bit: u6 = @intCast(start_col % 64);
     if (first_bit != 0) {
-        const mask = @as(u64, std.math.maxInt(u64)) << first_bit;
-        dst[first_word] ^= src[first_word] & mask;
-        for (dst[first_word + 1 ..], src[first_word + 1 ..]) |*d, s| {
-            d.* ^= s;
-        }
+        dst[first_word] ^= src[first_word] & (@as(u64, std.math.maxInt(u64)) << first_bit);
     } else {
-        for (dst[first_word..], src[first_word..]) |*d, s| {
-            d.* ^= s;
-        }
+        dst[first_word] ^= src[first_word];
+    }
+    for (dst[first_word + 1 ..], src[first_word + 1 ..]) |*d, s| {
+        d.* ^= s;
     }
 }

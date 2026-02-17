@@ -83,18 +83,15 @@ pub const ConnectedComponentGraph = struct {
         const root_v = self.find(v);
         if (root_u == root_v) return;
 
-        // Union by rank, merge smaller into larger
+        // Union by rank
         const total_size = self.component_size[root_u] + self.component_size[root_v];
         if (self.rank[root_u] < self.rank[root_v]) {
             self.parent[root_u] = root_v;
             self.component_size[root_v] = total_size;
-        } else if (self.rank[root_u] > self.rank[root_v]) {
-            self.parent[root_v] = root_u;
-            self.component_size[root_u] = total_size;
         } else {
             self.parent[root_v] = root_u;
             self.component_size[root_u] = total_size;
-            self.rank[root_u] += 1;
+            if (self.rank[root_u] == self.rank[root_v]) self.rank[root_u] += 1;
         }
     }
 

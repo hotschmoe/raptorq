@@ -49,16 +49,16 @@ Leverage Zig's strengths for high-throughput FEC.
   `math/octets.zig`. 16 parallel byte lookups per instruction via TBL (aarch64 NEON) /
   PSHUFB (x86_64 SSSE3). `addAssign` uses `@Vector` XOR (auto-lowers on all targets).
   Scalar fallback for other architectures. (2026-02-17)
-- [ ] **P0: Bit-packed binary matrix for Phase 1** - Replace OctetMatrix with
+- [x] **P0: Bit-packed binary matrix for Phase 1** - Replace OctetMatrix with
   DenseBinaryMatrix for binary rows in the PI solver. Enables popcount-based nonzero
   counting (64x faster pivot selection) and u64-word XOR (4x faster elimination).
-  See docs/PERFORMANCE_ANALYSIS.md for full profiling data and implementation plan.
-- [ ] **P1: HDPC row separation** - Store HDPC rows in their own OctetMatrix. Apply
-  GF(256) FMA only where needed, not mixed into binary matrix operations.
-- [ ] **P2: Partial row updates (Errata 11)** - During Phase 1 elimination, only XOR
-  columns [i, L) instead of full row. Saves ~25% of elimination work.
-- [ ] **P3: Persistent graph** - Pre-allocate ConnectedComponentGraph once per solve
-  and reset between iterations. Eliminates per-iteration alloc/dealloc churn.
+  See docs/PERFORMANCE_ANALYSIS.md for full profiling data. (2026-02-17)
+- [x] **P1: HDPC row separation** - Store HDPC rows in their own OctetMatrix. Apply
+  GF(256) FMA only where needed via set-bit iteration on binary pivot rows. (2026-02-17)
+- [x] **P2: Partial row updates (Errata 11)** - During Phase 1 elimination, only XOR
+  columns [i, L) instead of full row via xorRowRange. (2026-02-17)
+- [x] **P3: Persistent graph** - ConnectedComponentGraph with union-find allocated once
+  per solve and reset between iterations. O(alpha(n)) amortized edge operations. (2026-02-17)
 - [ ] **P4: Logical row indirection** - Track row permutations via index arrays instead
   of physically swapping row data. swapRows becomes O(1) instead of O(L).
 - [ ] **Memory layout optimization** - Cache-friendly data layout for symbol storage and

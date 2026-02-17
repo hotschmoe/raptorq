@@ -35,8 +35,7 @@ const SolverState = struct {
     c: []u32, // col permutation: c[physical] = original col index
     i: u32, // Phase 1 progress counter
     u: u32, // inactivated column count
-    num_hdpc: u32, // H (number of HDPC rows)
-    hdpc_start: u32, // L - H (cached)
+    hdpc_start: u32, // L - H (first HDPC row index)
     deferred_ops: std.ArrayList(SymbolOp),
     original_degree: []u16,
     allocator: std.mem.Allocator,
@@ -61,14 +60,12 @@ const SolverState = struct {
         for (c_arr, 0..) |*v, idx| v.* = @intCast(idx);
         @memset(orig_deg, 0);
 
-        // Move HDPC rows from [S, S+H) to [L-H, L) in OctetMatrix first
-        {
+        // Move HDPC rows from [S, S+H) to [L-H, L) in OctetMatrix
+        if (s != hdpc_start) {
             var j: u32 = 0;
             while (j < h) : (j += 1) {
-                if (s + j != l - h + j) {
-                    a.swapRows(s + j, l - h + j);
-                    std.mem.swap(u32, &d[s + j], &d[l - h + j]);
-                }
+                a.swapRows(s + j, hdpc_start + j);
+                std.mem.swap(u32, &d[s + j], &d[hdpc_start + j]);
             }
         }
 
@@ -110,7 +107,6 @@ const SolverState = struct {
             .c = c_arr,
             .i = 0,
             .u = l - w,
-            .num_hdpc = h,
             .hdpc_start = hdpc_start,
             .deferred_ops = .empty,
             .original_degree = orig_deg,
@@ -147,34 +143,26 @@ const SolverState = struct {
     }
 
     fn swapRowsCrossRegion(self: *SolverState, r1: u32, r2: u32) void {
-        // One row is binary, one is HDPC. We need to exchange their data.
         const bin_row = if (r1 < self.hdpc_start) r1 else r2;
         const hdpc_row = if (r1 >= self.hdpc_start) r1 else r2;
 
-        // Read binary row into temp, read HDPC row into binary, write temp to HDPC
+        // Exchange element by element across the two matrix representations
         var col: u32 = 0;
         while (col < self.l) : (col += 1) {
             const bin_val = self.binary.get(bin_row, col);
             const hdpc_val = self.hdpc.get(hdpc_row, col);
-
-            // Write HDPC value into binary row (only bit 0 matters for binary)
             self.binary.set(bin_row, col, !hdpc_val.isZero());
-            // Write binary value into HDPC row
             self.hdpc.set(hdpc_row, col, if (bin_val) Octet.ONE else Octet.ZERO);
         }
     }
 
     fn swapCols(self: *SolverState, c1: u32, c2: u32) void {
         if (c1 == c2) return;
-        // Swap in binary matrix (all binary rows), using start_row hint
         self.binary.swapCols(c1, c2, self.i);
-        // Swap in OctetMatrix for HDPC rows only
         var r = self.hdpc_start;
         while (r < self.l) : (r += 1) {
-            const v1 = self.hdpc.get(r, c1);
-            const v2 = self.hdpc.get(r, c2);
-            self.hdpc.set(r, c1, v2);
-            self.hdpc.set(r, c2, v1);
+            const row_bytes = self.hdpc.rowSlice(r);
+            std.mem.swap(u8, &row_bytes[c1], &row_bytes[c2]);
         }
         std.mem.swap(u32, &self.c[c1], &self.c[c2]);
     }
@@ -261,8 +249,9 @@ fn phase1(state: *SolverState) SolverError!void {
 
         state.swapCols(state.i, nz_buf[0]);
         if (min_r == 2) {
-            const second = if (nz_buf[1] == state.i) nz_buf[0] else nz_buf[1];
-            state.swapCols(v_end - 1, second);
+            // If the second nonzero was at the diagonal, it moved to nz_buf[0] during the swap above
+            const second_col = if (nz_buf[1] == state.i) nz_buf[0] else nz_buf[1];
+            state.swapCols(v_end - 1, second_col);
             state.u += 1;
         } else if (min_r >= 3) {
             var inactivated: u32 = 0;
@@ -345,17 +334,16 @@ fn eliminateColumn(state: *SolverState, col: u32, hdpc_start: u32) SolverError!v
         const factor = state.hdpc.get(row, col);
         if (factor.isZero()) continue;
 
-        // For each set bit in the binary pivot row, XOR factor into HDPC row
         const hdpc_row_bytes = state.hdpc.rowSlice(row);
         for (pivot_row_data, 0..) |word, wi| {
-            var w = word;
-            while (w != 0) {
-                const bit_pos: u32 = @intCast(@ctz(w));
-                const abs_col = @as(u32, @intCast(wi)) * 64 + bit_pos;
-                if (abs_col < state.l) {
-                    hdpc_row_bytes[abs_col] ^= factor.value;
+            var bits = word;
+            while (bits != 0) {
+                const bit_pos: u32 = @intCast(@ctz(bits));
+                const pivot_col = @as(u32, @intCast(wi)) * 64 + bit_pos;
+                if (pivot_col < state.l) {
+                    hdpc_row_bytes[pivot_col] ^= factor.value;
                 }
-                w &= w - 1;
+                bits &= bits - 1;
             }
         }
 
@@ -424,14 +412,12 @@ fn phase2(state: *SolverState) SolverError!void {
             }
         }
     }
-    // Fill from HDPC rows [hdpc_start, L)
+    // Fill from HDPC rows [hdpc_start, L) via slice copy
     {
         var row = state.hdpc_start;
         while (row < l) : (row += 1) {
-            var col: u32 = 0;
-            while (col < num_cols) : (col += 1) {
-                temp.set(row, col, state.hdpc.get(row, i_val + col));
-            }
+            const src = state.hdpc.rowSliceConst(row);
+            @memcpy(temp.rowSlice(row), src[i_val..][0..num_cols]);
         }
     }
 
@@ -494,14 +480,12 @@ fn phase2(state: *SolverState) SolverError!void {
             }
         }
     }
-    // Write back to HDPC rows in OctetMatrix
+    // Write back to HDPC rows in OctetMatrix via slice copy
     {
         var row = state.hdpc_start;
         while (row < l) : (row += 1) {
-            var c: u32 = 0;
-            while (c < num_cols) : (c += 1) {
-                state.hdpc.set(row, i_val + c, temp.get(row, c));
-            }
+            const src = temp.rowSliceConst(row);
+            @memcpy(state.hdpc.rowSlice(row)[i_val..][0..num_cols], src);
         }
     }
 }
@@ -517,7 +501,7 @@ fn phase3(state: *SolverState) SolverError!void {
         var row: u32 = 0;
         while (row < col) : (row += 1) {
             if (state.binary.get(row, col)) {
-                state.binary.xorRowRange(col, row, 0);
+                state.binary.xorRow(col, row);
                 try state.addOp(.{ .add_assign = .{
                     .src = state.d[col],
                     .dst = state.d[row],
@@ -564,8 +548,7 @@ test "pi_solver solves real constraint matrix K'=10" {
     const result = try solve(allocator, &a, &syms, k_prime);
     defer allocator.free(result.ops.ops);
 
-    // Verify solve succeeded by checking symbols are non-trivially permuted
-    // (identity matrix check removed: we no longer maintain the OctetMatrix as identity)
+    // Verify solve produced non-trivial output
     var all_zero = true;
     for (syms[0..27]) |s| {
         if (s.data[0] != 0) {

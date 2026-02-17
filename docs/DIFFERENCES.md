@@ -11,10 +11,10 @@ All deviations are design choices reflecting Zig idioms -- none are RFC 6330 vio
 - **RFC impact**: None.
 
 ### D-02: Concrete matrix types (no trait abstraction)
-- **What**: `DenseBinaryMatrix`, `SparseBinaryMatrix`, and `OctetMatrix` are distinct structs with no shared interface. The solver and constraint matrix operate directly on `OctetMatrix`.
+- **What**: `DenseBinaryMatrix`, `SparseBinaryMatrix`, and `OctetMatrix` are distinct structs with no shared interface. The PI solver uses `DenseBinaryMatrix` for binary rows and `OctetMatrix` for HDPC rows directly.
 - **Why**: Zig lacks trait objects. Comptime dispatch or tagged unions would add complexity without clear benefit at current scale.
 - **Rust behavior**: Trait objects (`dyn BinaryMatrix`, `dyn OctetMatrix`) for polymorphic matrix operations.
-- **Zig behavior**: Concrete types with similar but independent APIs.
+- **Zig behavior**: Concrete types with similar but independent APIs. The solver manages both matrix types explicitly.
 - **RFC impact**: None. Limits extensibility but not correctness.
 
 ### D-03: Split-nibble SIMD with inline assembly
@@ -31,12 +31,12 @@ All deviations are design choices reflecting Zig idioms -- none are RFC 6330 vio
 - **Zig behavior**: Comptime evaluation, tables baked into binary.
 - **RFC impact**: None. Identical results, different initialization strategy.
 
-### D-05: Dense-only constraint matrix
-- **What**: Constraint matrix is constructed entirely in dense `OctetMatrix` format. The LDPC and HDPC sub-matrices are written directly into the dense matrix without intermediate sparse representation.
-- **Why**: Simpler implementation. Sparse optimization deferred.
+### D-05: Constraint matrix construction then extraction
+- **What**: Constraint matrix is constructed entirely in dense `OctetMatrix` format. The solver then extracts binary rows into a `DenseBinaryMatrix` (u64 bit-packed) and keeps HDPC rows in the `OctetMatrix`.
+- **Why**: Construction in OctetMatrix is simple and correct. Extraction to bit-packed format happens once during solver init.
 - **Rust behavior**: May use sparse representation during construction, converting to dense for the solver.
-- **Zig behavior**: Dense from the start (L x L allocation where L = K' + S + H).
-- **RFC impact**: None for correctness. Memory overhead for large K'.
+- **Zig behavior**: Dense OctetMatrix construction, then split into DenseBinaryMatrix (binary rows) + OctetMatrix (HDPC rows) at solver init.
+- **RFC impact**: None for correctness.
 
 ### D-06: Eager operation application (operation vector discarded)
 - **What**: The PI solver produces an `OperationVector` recording matrix operations, but the encoder and decoder free it immediately rather than deferring symbol operations.

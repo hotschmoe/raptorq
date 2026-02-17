@@ -185,7 +185,7 @@ src/
     constraint_matrix.zig           # RFC 5.3.3 construction (Layer 3)
   solver/
     pi_solver.zig                   # 5-phase inactivation decoding (Layer 4)
-    graph.zig                       # Connected components (Layer 4)
+    graph.zig                       # Union-find connected components (Layer 4)
   util/
     sparse_vec.zig                  # Sparse binary vector
     arraymap.zig                    # Specialized map types
@@ -198,7 +198,8 @@ src/
 - **Degree distribution** - Table 1 maps random values to LT code degrees
 - **Tuple generator** `Tuple[K', X]` - produces (d, a, b, d1, a1, b1) for encoding symbol generation
 - **Constraint matrix construction** - builds the A matrix from LDPC, HDPC, LT, and PI sub-matrices
-- **Inactivation decoding** - Gaussian elimination variant for solving A * C = D
+- **Inactivation decoding** - Gaussian elimination variant for solving A * C = D using
+  bit-packed DenseBinaryMatrix for binary rows and OctetMatrix for HDPC rows
 
 #### Build and Test
 
