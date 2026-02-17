@@ -1,10 +1,11 @@
 # RaptorQ Zig Port - Status
 
-## Current Phase: Phase 10 - Optimization
+## Current Phase: Phase 10 - Optimization & Hardening
 
 Core encode/decode pipeline is complete and fully conformant. All layers (0-6) implemented
 with end-to-end roundtrip verification including repair symbol generation and reconstruction.
-86/86 conformance tests passing across all K' values.
+86/86 conformance tests passing across all K' values. No known RFC 6330 conformance gaps
+(see GAPS.md).
 
 ### Phases
 
@@ -19,7 +20,7 @@ with end-to-end roundtrip verification including repair symbol generation and re
 | 7 | Encoder - Source block encoding (RFC 5.3) | Complete |
 | 8 | Decoder - Source block decoding | Complete |
 | 9 | Integration - Multi-block encode/decode, public API | Complete |
-| 10 | Optimization - SIMD, memory layout, performance | Not Started |
+| 10 | Optimization & Hardening | In Progress |
 
 ### Build Status
 
@@ -33,7 +34,67 @@ with end-to-end roundtrip verification including repair symbol generation and re
   Fixed HDPC row handling (Errata 2), PI symbol inactivation, connected component graph
   substep, and decoder padding symbols. Resolved all 15 SingularMatrix failures for K'>=18.
 
-### Remaining Work
+---
 
-- SIMD vectorization for bulk GF(256) operations (see GAPS.md G-02)
-- Sparse matrix utilization in constraint matrix / solver pipeline (see GAPS.md G-03)
+## Roadmap
+
+### Performance Optimizations
+
+Leverage Zig's strengths for high-throughput FEC.
+
+- [ ] **SIMD vectorization** (former G-02) - `math/octets.zig` uses scalar loops for
+  addAssign, mulAssignScalar, and fmaSlice. Zig's `@Vector` built-in can provide 2-8x
+  speedups on modern CPUs. Should also specialize for NEON (aarch64) and SSE/AVX (x86_64).
+- [ ] **Sparse matrix utilization** (former G-03) - `SparseBinaryMatrix` exists but is
+  unused. Exploit LDPC row sparsity during constraint matrix construction and early solver
+  phases to reduce memory and improve performance for large K'.
+- [ ] **Memory layout optimization** - Cache-friendly data layout for symbol storage and
+  matrix rows. Profile and minimize allocator pressure in hot paths.
+- [ ] **Comptime specialization** - Explore comptime-specialized paths for common K' values
+  or symbol sizes where the compiler can unroll/optimize aggressively.
+
+### Interop Testing
+
+Validate wire-compatibility with other RFC 6330 implementations.
+
+- [ ] **Encode here, decode elsewhere** - Generate encoding symbols and verify a reference
+  implementation (e.g. Qualcomm's libRaptorQ, or the Rust raptorq crate) can decode them.
+- [ ] **Decode foreign symbols** - Feed encoding symbols from a reference implementation
+  into our decoder and verify correct reconstruction.
+- [ ] **OTI serialization cross-check** - Verify our 12-byte OTI format matches other
+  implementations byte-for-byte.
+
+### Fuzz Testing
+
+Discover edge cases through randomized inputs.
+
+- [ ] **Encode/decode roundtrip fuzzer** - Random data sizes, symbol sizes, alignment
+  values, sub-block counts. Verify roundtrip correctness for every combination.
+- [ ] **Loss pattern fuzzer** - Random subsets of encoding symbols (varying loss rates,
+  burst loss, systematic-only loss, repair-only recovery).
+- [ ] **Malformed input fuzzer** - Corrupt packets, truncated data, out-of-range ESI/SBN
+  values. Verify graceful error handling, no panics or undefined behavior.
+
+### Benchmarking
+
+Separate `benchmark/` directory with reproducible, measurable scenarios.
+
+- [ ] **Throughput benchmarks** - Encode and decode MB/s across a range of K' values and
+  symbol sizes. Track regressions over time.
+- [ ] **Memory profiling** - Peak allocation for encode/decode by K'. Identify where
+  dense matrix O(K'^2) memory dominates.
+- [ ] **Comparative benchmarks** - Side-by-side with reference implementations where
+  possible (same hardware, same parameters).
+
+### Baremetal Target
+
+Goal: build and run on aarch64-freestanding (no OS, no libc).
+
+- [ ] **Cross-compile verification** - `zig build -Dtarget=aarch64-freestanding` must
+  compile clean. Identify and fix any implicit libc or OS dependencies.
+- [ ] **Allocator abstraction audit** - Verify all allocation goes through the injected
+  `std.mem.Allocator` interface. No global state, no static buffers, no thread-locals.
+- [ ] **No-std audit** - Audit imports for anything that pulls in OS-specific code
+  (std.fs, std.os, std.debug, std.io). Ensure the core library path is free of these.
+- [ ] **Freestanding allocator example** - Provide or document a fixed-buffer allocator
+  setup for embedded use (e.g. `std.heap.FixedBufferAllocator`).
