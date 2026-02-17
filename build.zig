@@ -10,6 +10,40 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Example executable
+    const example_exe = b.addExecutable(.{
+        .name = "encode_decode",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/encode_decode.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "raptorq", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(example_exe);
+    const run_example = b.addRunArtifact(example_exe);
+    const example_step = b.step("example", "Build and run the encode/decode example");
+    example_step.dependOn(&run_example.step);
+
+    // Benchmark executable (forced ReleaseFast)
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmark/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "raptorq", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(bench_exe);
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Build and run benchmarks (ReleaseFast)");
+    bench_step.dependOn(&run_bench.step);
+
     // Unit tests (from library module)
     const mod_tests = b.addTest(.{
         .root_module = mod,
