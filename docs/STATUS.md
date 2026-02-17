@@ -30,6 +30,9 @@ with end-to-end roundtrip verification including repair symbol generation and re
 
 ### Recent Changes
 
+- **SIMD vectorization** - Split-nibble GF(256) multiplication in `math/octets.zig` using
+  TBL (aarch64 NEON), PSHUFB (x86_64 SSSE3), and scalar fallback. Vectorized `addAssign`,
+  `fmaSlice`, and `mulAssignScalar`. Fixed O(n^2) BFS queue in `solver/graph.zig`.
 - **PI solver rewrite** - Complete rewrite of inactivation decoding for RFC 6330 conformance.
   Fixed HDPC row handling (Errata 2), PI symbol inactivation, connected component graph
   substep, and decoder padding symbols. Resolved all 15 SingularMatrix failures for K'>=18.
@@ -42,9 +45,10 @@ with end-to-end roundtrip verification including repair symbol generation and re
 
 Leverage Zig's strengths for high-throughput FEC.
 
-- [ ] **SIMD vectorization** (former G-02) - `math/octets.zig` uses scalar loops for
-  addAssign, mulAssignScalar, and fmaSlice. Zig's `@Vector` built-in can provide 2-8x
-  speedups on modern CPUs. Should also specialize for NEON (aarch64) and SSE/AVX (x86_64).
+- [x] **SIMD vectorization** (former G-02) - Split-nibble GF(256) multiplication in
+  `math/octets.zig`. 16 parallel byte lookups per instruction via TBL (aarch64 NEON) /
+  PSHUFB (x86_64 SSSE3). `addAssign` uses `@Vector` XOR (auto-lowers on all targets).
+  Scalar fallback for other architectures. (2026-02-17)
 - [ ] **Sparse matrix utilization** (former G-03) - `SparseBinaryMatrix` exists but is
   unused. Exploit LDPC row sparsity during constraint matrix construction and early solver
   phases to reduce memory and improve performance for large K'.

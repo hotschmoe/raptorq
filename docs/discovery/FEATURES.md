@@ -5,7 +5,7 @@ Features identified from cberner/raptorq Rust implementation mapped to RFC 6330.
 | ID | Feature | RFC Section | Zig Source | Status |
 |----|---------|-------------|------------|--------|
 | F01 | GF(256) field arithmetic | 5.7 | math/octet.zig | Complete |
-| F02 | Bulk octet operations | 5.7 | math/octets.zig | Complete (scalar, no SIMD) |
+| F02 | Bulk octet operations | 5.7 | math/octets.zig | Complete (SIMD: NEON/SSSE3/scalar) |
 | F03 | GF(2) binary operations | - | math/gf2.zig | Complete |
 | F04 | PRNG (Rand function) | 5.5 | math/rng.zig | Complete |
 | F05 | Systematic index lookup (Table 2) | 5.6 | tables/systematic_constants.zig | Complete |

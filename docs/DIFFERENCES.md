@@ -17,12 +17,12 @@ All deviations are design choices reflecting Zig idioms -- none are RFC 6330 vio
 - **Zig behavior**: Concrete types with similar but independent APIs.
 - **RFC impact**: None. Limits extensibility but not correctness.
 
-### D-03: Scalar bulk operations (no SIMD)
-- **What**: `math/octets.zig` uses scalar for-loops over byte slices. No `@Vector` usage.
-- **Why**: Correctness-first approach. SIMD optimization deferred to Phase 10.
-- **Rust behavior**: Vectorized or SIMD-intrinsic bulk GF(256) operations.
-- **Zig behavior**: Scalar element-by-element loops.
-- **RFC impact**: None. Performance gap only (estimated 2-8x for bulk operations).
+### D-03: Split-nibble SIMD with inline assembly
+- **What**: `math/octets.zig` uses split-nibble GF(256) multiplication with inline assembly for TBL (aarch64 NEON) and PSHUFB (x86_64 SSSE3). `addAssign` uses `@Vector` XOR. Scalar fallback on other architectures.
+- **Why**: 16 parallel byte lookups per instruction. Branchless (no per-byte zero checks in SIMD path).
+- **Rust behavior**: `std::simd` or manual intrinsics in `octets.rs`.
+- **Zig behavior**: Inline asm for platform-specific table lookups, `@Vector` for portable XOR, scalar tail for remainder bytes.
+- **RFC impact**: None. Same mathematical results, faster execution.
 
 ### D-04: Comptime table generation
 - **What**: GF(256) exp/log tables, PRNG V0-V3 tables, and systematic constants are all computed or embedded at compile time.
