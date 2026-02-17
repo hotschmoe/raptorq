@@ -125,6 +125,22 @@ const SolverState = struct {
         return count;
     }
 
+    /// Collect nonzero column indices in V for the given row (up to buf.len).
+    /// Returns the number of indices written.
+    fn nonzeroColsInV(self: *SolverState, row: u32, buf: []u32) u32 {
+        const v_start = self.i;
+        const v_end = self.l - self.u;
+        var count: u32 = 0;
+        var col = v_start;
+        while (col < v_end and count < buf.len) : (col += 1) {
+            if (!self.a.get(row, col).isZero()) {
+                buf[count] = col;
+                count += 1;
+            }
+        }
+        return count;
+    }
+
     fn addOp(self: *SolverState, op: SymbolOp) SolverError!void {
         self.deferred_ops.append(self.allocator, op) catch return error.OutOfMemory;
     }
@@ -166,74 +182,21 @@ fn phase1(state: *SolverState) SolverError!void {
     while (state.i + state.u < l) {
         const v_end = l - state.u;
 
-        // Find row with minimum nonzeros in V among non-HDPC rows [i, hdpc_start)
-        var min_r: u32 = std.math.maxInt(u32);
-        var chosen_row: u32 = 0;
-        var chosen_orig_deg: u16 = std.math.maxInt(u16);
-        var found = false;
+        const selection = try selectPivotRow(state, hdpc_start);
 
-        {
-            var row = state.i;
-            while (row < hdpc_start) : (row += 1) {
-                const r_val = state.rowNonzerosInV(row);
-                if (r_val == 0) continue;
-                if (r_val < min_r or
-                    (r_val == min_r and state.original_degree[row] < chosen_orig_deg))
-                {
-                    min_r = r_val;
-                    chosen_row = row;
-                    chosen_orig_deg = state.original_degree[row];
-                    found = true;
-                }
-            }
-        }
-
-        if (!found) return error.SingularMatrix;
-
-        // r == 2: graph substep for connected component selection
-        if (min_r == 2) {
-            if (try graphSubstep(state, hdpc_start)) |graph_row| {
-                chosen_row = graph_row;
-            }
-        }
-
-        // Swap chosen row to position i
-        state.swapRows(state.i, chosen_row);
+        state.swapRows(state.i, selection.row);
+        const min_r = selection.nonzeros;
 
         // Column swaps: first nonzero to diagonal, remaining r-1 to U boundary
-        if (min_r == 1) {
-            var pivot_col = state.i;
-            while (pivot_col < v_end) : (pivot_col += 1) {
-                if (!state.a.get(state.i, pivot_col).isZero()) break;
-            }
-            state.swapCols(state.i, pivot_col);
-        } else if (min_r == 2) {
-            var cols_found: [2]u32 = undefined;
-            var cf: u32 = 0;
-            {
-                var c_iter = state.i;
-                while (c_iter < v_end and cf < 2) : (c_iter += 1) {
-                    if (!state.a.get(state.i, c_iter).isZero()) {
-                        cols_found[cf] = c_iter;
-                        cf += 1;
-                    }
-                }
-            }
-            state.swapCols(state.i, cols_found[0]);
-            const second = if (cols_found[1] == state.i)
-                cols_found[0]
-            else
-                cols_found[1];
+        var nz_buf: [2]u32 = undefined;
+        _ = state.nonzeroColsInV(state.i, &nz_buf);
+
+        state.swapCols(state.i, nz_buf[0]);
+        if (min_r == 2) {
+            const second = if (nz_buf[1] == state.i) nz_buf[0] else nz_buf[1];
             state.swapCols(v_end - 1, second);
             state.u += 1;
-        } else {
-            // r >= 3: pivot first nonzero, inactivate the rest
-            var first_nz = state.i;
-            while (first_nz < v_end) : (first_nz += 1) {
-                if (!state.a.get(state.i, first_nz).isZero()) break;
-            }
-            state.swapCols(state.i, first_nz);
-
+        } else if (min_r >= 3) {
             var inactivated: u32 = 0;
             var c_iter = state.i + 1;
             var current_v_end = v_end;
@@ -249,35 +212,73 @@ fn phase1(state: *SolverState) SolverError!void {
             state.u += inactivated;
         }
 
-        // Eliminate column i from rows below: non-HDPC use XOR, HDPC use FMA
-        {
-            var row = state.i + 1;
-            while (row < hdpc_start) : (row += 1) {
-                if (!state.a.get(row, state.i).isZero()) {
-                    state.a.addAssignRow(state.i, row);
-                    try state.addOp(.{ .add_assign = .{
-                        .src = state.d[state.i],
-                        .dst = state.d[row],
-                    } });
-                }
-            }
-        }
-        {
-            var row = hdpc_start;
-            while (row < l) : (row += 1) {
-                const factor = state.a.get(row, state.i);
-                if (!factor.isZero()) {
-                    state.a.fmaRow(state.i, row, factor);
-                    try state.addOp(.{ .fma = .{
-                        .src = state.d[state.i],
-                        .dst = state.d[row],
-                        .scalar = factor,
-                    } });
-                }
-            }
-        }
+        // Eliminate column i from rows below
+        try eliminateColumn(state, state.i, hdpc_start);
 
         state.i += 1;
+    }
+}
+
+const PivotSelection = struct { row: u32, nonzeros: u32 };
+
+/// Select the best pivot row from non-HDPC rows in [i, hdpc_start).
+/// Chooses minimum nonzeros in V, breaking ties by original degree.
+/// For r=2, applies the graph substep (connected component heuristic).
+fn selectPivotRow(state: *SolverState, hdpc_start: u32) SolverError!PivotSelection {
+    var min_r: u32 = std.math.maxInt(u32);
+    var chosen_row: u32 = 0;
+    var chosen_orig_deg: u16 = std.math.maxInt(u16);
+    var found = false;
+
+    var row = state.i;
+    while (row < hdpc_start) : (row += 1) {
+        const r_val = state.rowNonzerosInV(row);
+        if (r_val == 0) continue;
+        if (r_val < min_r or
+            (r_val == min_r and state.original_degree[row] < chosen_orig_deg))
+        {
+            min_r = r_val;
+            chosen_row = row;
+            chosen_orig_deg = state.original_degree[row];
+            found = true;
+        }
+    }
+
+    if (!found) return error.SingularMatrix;
+
+    if (min_r == 2) {
+        if (try graphSubstep(state, hdpc_start)) |graph_row| {
+            chosen_row = graph_row;
+        }
+    }
+
+    return .{ .row = chosen_row, .nonzeros = min_r };
+}
+
+/// Eliminate a pivot column from all rows below it.
+/// Non-HDPC rows use binary XOR; HDPC rows use GF(256) FMA.
+fn eliminateColumn(state: *SolverState, col: u32, hdpc_start: u32) SolverError!void {
+    var row = col + 1;
+    while (row < hdpc_start) : (row += 1) {
+        if (!state.a.get(row, col).isZero()) {
+            state.a.addAssignRow(col, row);
+            try state.addOp(.{ .add_assign = .{
+                .src = state.d[col],
+                .dst = state.d[row],
+            } });
+        }
+    }
+    row = hdpc_start;
+    while (row < state.l) : (row += 1) {
+        const factor = state.a.get(row, col);
+        if (!factor.isZero()) {
+            state.a.fmaRow(col, row, factor);
+            try state.addOp(.{ .fma = .{
+                .src = state.d[col],
+                .dst = state.d[row],
+                .scalar = factor,
+            } });
+        }
     }
 }
 
@@ -292,21 +293,13 @@ fn graphSubstep(state: *SolverState, hdpc_start: u32) SolverError!?u32 {
     var graph = Graph.init(state.allocator, v_size) catch return error.OutOfMemory;
     defer graph.deinit();
 
-    // Build graph: V-columns are nodes, r=2 rows are edges
     var row = state.i;
     while (row < hdpc_start) : (row += 1) {
         if (state.rowNonzerosInV(row) != 2) continue;
         var cols: [2]u32 = undefined;
-        var cf: u32 = 0;
-        var col = v_start;
-        while (col < v_end and cf < 2) : (col += 1) {
-            if (!state.a.get(row, col).isZero()) {
-                cols[cf] = col - v_start;
-                cf += 1;
-            }
-        }
-        if (cf == 2) {
-            graph.addEdge(cols[0], cols[1]) catch return error.OutOfMemory;
+        if (state.nonzeroColsInV(row, &cols) == 2) {
+            graph.addEdge(cols[0] - v_start, cols[1] - v_start) catch
+                return error.OutOfMemory;
         }
     }
 
@@ -316,15 +309,26 @@ fn graphSubstep(state: *SolverState, hdpc_start: u32) SolverError!?u32 {
 
     if (labels.len == 0) return null;
 
-    // Find largest component
+    const target_col = try findLargestComponentColumn(state.allocator, labels, v_start);
+
+    row = state.i;
+    while (row < hdpc_start) : (row += 1) {
+        if (state.rowNonzerosInV(row) != 2) continue;
+        if (!state.a.get(row, target_col).isZero()) return row;
+    }
+
+    return null;
+}
+
+/// Find a column belonging to the largest connected component.
+fn findLargestComponentColumn(allocator: std.mem.Allocator, labels: []const u32, v_start: u32) SolverError!u32 {
     var max_label: u32 = 0;
     for (labels) |lv| {
         if (lv > max_label) max_label = lv;
     }
 
-    const sizes = state.allocator.alloc(u32, max_label + 1) catch
-        return error.OutOfMemory;
-    defer state.allocator.free(sizes);
+    const sizes = allocator.alloc(u32, max_label + 1) catch return error.OutOfMemory;
+    defer allocator.free(sizes);
     @memset(sizes, 0);
     for (labels) |lv| sizes[lv] += 1;
 
@@ -337,55 +341,24 @@ fn graphSubstep(state: *SolverState, hdpc_start: u32) SolverError!?u32 {
         }
     }
 
-    // Find a column in the largest component
-    var target_col: ?u32 = null;
     for (labels, 0..) |lv, node| {
-        if (lv == largest_comp) {
-            target_col = @as(u32, @intCast(node)) + v_start;
-            break;
-        }
+        if (lv == largest_comp) return @as(u32, @intCast(node)) + v_start;
     }
 
-    if (target_col == null) return null;
-
-    // Find a row with exactly 2 nonzeros in V that touches target_col
-    row = state.i;
-    while (row < hdpc_start) : (row += 1) {
-        if (state.rowNonzerosInV(row) != 2) continue;
-        if (!state.a.get(row, target_col.?).isZero()) return row;
-    }
-
-    return null;
+    unreachable;
 }
 
 /// Phase 2: Solve u x u inactivated submatrix (Section 5.4.2.3)
 /// Standard GF(256) Gaussian elimination with full pivoting.
 /// Eliminates from ALL rows (including first i) to also zero the upper-right block.
 fn phase2(state: *SolverState) SolverError!void {
-    const i_val = state.i;
     const l = state.l;
 
-    if (i_val >= l) return;
-
-    var col: u32 = i_val;
+    var col = state.i;
     while (col < l) : (col += 1) {
-        // Find pivot in [col, L)
-        var pivot_row: ?u32 = null;
-        {
-            var r = col;
-            while (r < l) : (r += 1) {
-                if (!state.a.get(r, col).isZero()) {
-                    pivot_row = r;
-                    break;
-                }
-            }
-        }
+        const pivot_row = findPivot(state, col) orelse return error.SingularMatrix;
+        state.swapRows(col, pivot_row);
 
-        if (pivot_row == null) return error.SingularMatrix;
-
-        state.swapRows(col, pivot_row.?);
-
-        // Scale pivot to 1
         const pivot_val = state.a.get(col, col);
         if (!pivot_val.isOne()) {
             const inv = pivot_val.inverse();
@@ -396,23 +369,29 @@ fn phase2(state: *SolverState) SolverError!void {
             } });
         }
 
-        // Eliminate from all other rows
-        {
-            var r: u32 = 0;
-            while (r < l) : (r += 1) {
-                if (r == col) continue;
-                const factor = state.a.get(r, col);
-                if (!factor.isZero()) {
-                    state.a.fmaRow(col, r, factor);
-                    try state.addOp(.{ .fma = .{
-                        .src = state.d[col],
-                        .dst = state.d[r],
-                        .scalar = factor,
-                    } });
-                }
+        var r: u32 = 0;
+        while (r < l) : (r += 1) {
+            if (r == col) continue;
+            const factor = state.a.get(r, col);
+            if (!factor.isZero()) {
+                state.a.fmaRow(col, r, factor);
+                try state.addOp(.{ .fma = .{
+                    .src = state.d[col],
+                    .dst = state.d[r],
+                    .scalar = factor,
+                } });
             }
         }
     }
+}
+
+/// Find first row in [col, L) with nonzero entry in the given column.
+fn findPivot(state: *SolverState, col: u32) ?u32 {
+    var r = col;
+    while (r < state.l) : (r += 1) {
+        if (!state.a.get(r, col).isZero()) return r;
+    }
+    return null;
 }
 
 /// Phase 3: Back-substitution on upper-triangular first-i block (Section 5.4.2.4)
@@ -423,12 +402,12 @@ fn phase2(state: *SolverState) SolverError!void {
 fn phase3(state: *SolverState) SolverError!void {
     if (state.i <= 1) return;
 
-    var col: u32 = state.i - 1;
-    while (col >= 1) : (col -= 1) {
+    var col = state.i;
+    while (col > 1) {
+        col -= 1;
         var row: u32 = 0;
         while (row < col) : (row += 1) {
-            const val = state.a.get(row, col);
-            if (!val.isZero()) {
+            if (!state.a.get(row, col).isZero()) {
                 state.a.addAssignRow(col, row);
                 try state.addOp(.{ .add_assign = .{
                     .src = state.d[col],
@@ -436,29 +415,19 @@ fn phase3(state: *SolverState) SolverError!void {
                 } });
             }
         }
-        if (col == 0) break;
     }
 }
 
 /// Apply all deferred operations to symbols and remap via permutations.
 fn applyAndRemap(state: *SolverState, symbols: []Symbol) SolverError!void {
-    for (state.deferred_ops.items) |op| {
-        switch (op) {
-            .add_assign => |o| symbols[o.dst].addAssign(symbols[o.src]),
-            .mul_assign => |o| symbols[o.index].mulAssign(o.scalar),
-            .fma => |o| symbols[o.dst].fma(symbols[o.src], o.scalar),
-            .reorder => |o| std.mem.swap(Symbol, &symbols[o.src], &symbols[o.dst]),
-        }
-    }
+    const ops = OperationVector{ .ops = state.deferred_ops.items };
+    ops.apply(symbols);
 
-    // Remap: symbols[c[j]] = temp[d[j]]
     const temp = state.allocator.alloc(Symbol, state.l) catch
         return error.OutOfMemory;
     defer state.allocator.free(temp);
 
-    for (temp, 0..) |*t, idx| {
-        t.* = symbols[idx];
-    }
+    @memcpy(temp, symbols[0..state.l]);
     for (0..state.l) |j| {
         symbols[state.c[j]] = temp[state.d[j]];
     }
