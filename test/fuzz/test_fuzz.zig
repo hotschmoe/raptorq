@@ -1,4 +1,8 @@
 // Fuzz tests for the raptorq encoder/decoder pipeline.
+//
+// The sweep_* tests provide deterministic coverage on every `zig build test-fuzz`
+// invocation. The fuzz_* tests wrap std.testing.fuzz for coverage-guided fuzzing
+// (requires --fuzz flag and a Release build due to Zig 0.15.x Debug-mode bugs).
 
 const std = @import("std");
 const raptorq = @import("raptorq");
@@ -23,6 +27,232 @@ const DIVISORS = [_][]const u8{
     &.{ 1, 2, 3, 4, 6, 8, 12, 16, 24, 48 }, // 48
     &.{ 1, 2, 4, 8, 16, 32, 64 },       // 64
 };
+
+// --- Sweep test infrastructure ---
+
+const SWEEP_SEED: u64 = 0xDEAD_BEEF_CAFE_1337;
+
+const SweepCase = struct {
+    T: u16,
+    Al: u8,
+    data_len: usize,
+};
+
+const SWEEP_CASES = [_]SweepCase{
+    // T=1: edge case, single-byte symbols
+    .{ .T = 1, .Al = 1, .data_len = 1 },
+    .{ .T = 1, .Al = 1, .data_len = 10 },
+    .{ .T = 1, .Al = 1, .data_len = 50 },
+    .{ .T = 1, .Al = 1, .data_len = 101 },
+    // T=4: small symbols, various K values
+    .{ .T = 4, .Al = 4, .data_len = 4 },
+    .{ .T = 4, .Al = 2, .data_len = 40 },
+    .{ .T = 4, .Al = 1, .data_len = 48 },
+    .{ .T = 4, .Al = 4, .data_len = 100 },
+    .{ .T = 4, .Al = 4, .data_len = 200 },
+    // T=8: common small symbol size
+    .{ .T = 8, .Al = 4, .data_len = 8 },
+    .{ .T = 8, .Al = 8, .data_len = 88 },
+    .{ .T = 8, .Al = 2, .data_len = 96 },
+    .{ .T = 8, .Al = 4, .data_len = 400 },
+    // T=12: non-power-of-two
+    .{ .T = 12, .Al = 4, .data_len = 12 },
+    .{ .T = 12, .Al = 3, .data_len = 132 },
+    .{ .T = 12, .Al = 6, .data_len = 300 },
+    // T=16: medium symbol
+    .{ .T = 16, .Al = 4, .data_len = 16 },
+    .{ .T = 16, .Al = 8, .data_len = 160 },
+    .{ .T = 16, .Al = 16, .data_len = 400 },
+    // T=24: larger non-power-of-two
+    .{ .T = 24, .Al = 8, .data_len = 24 },
+    .{ .T = 24, .Al = 4, .data_len = 264 },
+    .{ .T = 24, .Al = 12, .data_len = 600 },
+    // T=32: common medium
+    .{ .T = 32, .Al = 4, .data_len = 32 },
+    .{ .T = 32, .Al = 8, .data_len = 352 },
+    .{ .T = 32, .Al = 16, .data_len = 800 },
+    // T=48: larger symbol
+    .{ .T = 48, .Al = 8, .data_len = 48 },
+    .{ .T = 48, .Al = 16, .data_len = 528 },
+    // T=64: largest symbol size tested
+    .{ .T = 64, .Al = 8, .data_len = 64 },
+    .{ .T = 64, .Al = 16, .data_len = 640 },
+    .{ .T = 64, .Al = 32, .data_len = 1024 },
+};
+
+fn generateData(prng: *std.Random.Xoshiro256, buf: []u8) void {
+    prng.fill(buf);
+}
+
+// --- Core helpers (shared by sweep and fuzz tests) ---
+
+fn roundtripCore(allocator: std.mem.Allocator, data: []const u8, T: u16, N: u16, Al: u8) !void {
+    var enc = try Encoder.init(allocator, data, T, N, Al);
+    defer enc.deinit();
+
+    var dec = try Decoder.init(allocator, enc.objectTransmissionInformation());
+    defer dec.deinit();
+
+    const k_prime = enc.sub_encoders[0].k_prime;
+
+    var esi: u32 = 0;
+    while (esi < k_prime) : (esi += 1) {
+        const pkt = try enc.encode(0, esi);
+        defer allocator.free(pkt.data);
+        try dec.addPacket(pkt);
+    }
+
+    const decoded = (try dec.decode()) orelse return error.DecodeFailed;
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, data, decoded);
+}
+
+fn lossRecoveryCore(allocator: std.mem.Allocator, data: []const u8, T: u16, Al: u8, drop: u32, extra: u32) !void {
+    var enc = try Encoder.init(allocator, data, T, 1, Al);
+    defer enc.deinit();
+
+    var dec = try Decoder.init(allocator, enc.objectTransmissionInformation());
+    defer dec.deinit();
+
+    const k = enc.sourceBlockK(0);
+    const k_prime = enc.sub_encoders[0].k_prime;
+
+    if (k < 2) return;
+
+    const drop_count = @min(drop, k - 1);
+
+    // Send source symbols, skipping the first drop_count
+    var esi: u32 = drop_count;
+    while (esi < k) : (esi += 1) {
+        const pkt = try enc.encode(0, esi);
+        defer allocator.free(pkt.data);
+        try dec.addPacket(pkt);
+    }
+
+    // Send repair symbols to compensate
+    const received_source = k - drop_count;
+    const repair_needed = (k_prime - received_source) + extra;
+    var sent: u32 = 0;
+    while (sent < repair_needed) : (sent += 1) {
+        const pkt = try enc.encode(0, k + sent);
+        defer allocator.free(pkt.data);
+        try dec.addPacket(pkt);
+    }
+
+    const decoded = (try dec.decode()) orelse return error.DecodeFailed;
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, data, decoded);
+}
+
+// --- Sweep tests ---
+
+test "sweep_roundtrip" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.Xoshiro256.init(SWEEP_SEED);
+
+    for (SWEEP_CASES) |case| {
+        const buf = try allocator.alloc(u8, case.data_len);
+        defer allocator.free(buf);
+        generateData(&prng, buf);
+
+        // N=1: single sub-block
+        try roundtripCore(allocator, buf, case.T, 1, case.Al);
+
+        // N=2 when T/Al >= 2 (valid sub-block partitioning)
+        const t_al: u16 = case.T / @as(u16, case.Al);
+        if (t_al >= 2) {
+            try roundtripCore(allocator, buf, case.T, 2, case.Al);
+        }
+    }
+}
+
+test "sweep_loss_recovery" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.Xoshiro256.init(SWEEP_SEED +% 1);
+
+    for (SWEEP_CASES) |case| {
+        const buf = try allocator.alloc(u8, case.data_len);
+        defer allocator.free(buf);
+        generateData(&prng, buf);
+
+        // Pattern 1: drop 1 source symbol, 0 extra repair
+        try lossRecoveryCore(allocator, buf, case.T, case.Al, 1, 0);
+
+        // Pattern 2: drop ~25% of source symbols, 1 extra repair
+        const k_approx: u32 = @intCast((@as(usize, @max(case.data_len, 1)) + @as(usize, case.T) - 1) / @as(usize, case.T));
+        const drop25 = @max(1, k_approx / 4);
+        try lossRecoveryCore(allocator, buf, case.T, case.Al, drop25, 1);
+    }
+}
+
+test "sweep_serialization" {
+    var prng = std.Random.Xoshiro256.init(SWEEP_SEED +% 2);
+
+    for (0..200) |_| {
+        // PayloadId roundtrip
+        var pid_bytes: [4]u8 = undefined;
+        prng.fill(&pid_bytes);
+        const pid = PayloadId.deserialize(pid_bytes);
+        try std.testing.expectEqual(pid_bytes, pid.serialize());
+
+        // OTI roundtrip
+        var oti_bytes: [12]u8 = undefined;
+        prng.fill(&oti_bytes);
+        oti_bytes[5] = 0; // reserved byte
+        const oti = OTI.deserialize(oti_bytes);
+        try std.testing.expectEqual(oti_bytes, oti.serialize());
+    }
+}
+
+test "sweep_malformed_input" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.Xoshiro256.init(SWEEP_SEED +% 3);
+
+    for (0..50) |_| {
+        // Pick a random valid symbol size and alignment for the OTI
+        const sym_idx = prng.random().uintLessThan(usize, SYMBOL_SIZES.len);
+        const symbol_size = SYMBOL_SIZES[sym_idx];
+        const divisors = DIVISORS[sym_idx];
+        const alignment = divisors[prng.random().uintLessThan(usize, divisors.len)];
+
+        const transfer_len: u64 = @as(u64, prng.random().uintLessThan(u16, 512)) + 1;
+
+        const config = OTI{
+            .transfer_length = transfer_len,
+            .symbol_size = symbol_size,
+            .num_source_blocks = 1,
+            .num_sub_blocks = 1,
+            .alignment = alignment,
+        };
+
+        var dec = Decoder.init(allocator, config) catch continue;
+        defer dec.deinit();
+
+        // Feed random packets
+        const num_packets = prng.random().uintLessThan(u8, 20) + 1;
+        for (0..num_packets) |_| {
+            const pkt_data = try allocator.alloc(u8, symbol_size);
+            defer allocator.free(pkt_data);
+            prng.fill(pkt_data);
+
+            const esi = prng.random().uintLessThan(u32, 256);
+            dec.addPacket(.{
+                .payload_id = .{
+                    .source_block_number = 0,
+                    .encoding_symbol_id = esi,
+                },
+                .data = pkt_data,
+            }) catch continue;
+        }
+
+        // Attempt decode -- must not panic
+        if (dec.decode()) |maybe_result| {
+            if (maybe_result) |result| allocator.free(result);
+        } else |_| {}
+    }
+}
+
+// --- Fuzz wrappers (coverage-guided, require --fuzz flag) ---
 
 const FuzzParams = struct {
     symbol_size: u16,
@@ -58,33 +288,7 @@ fn parseParams(input: []const u8) ?FuzzParams {
 
 fn fuzzRoundtrip(_: void, input: []const u8) anyerror!void {
     const params = parseParams(input) orelse return;
-    const allocator = std.testing.allocator;
-
-    var enc = try Encoder.init(
-        allocator,
-        params.data,
-        params.symbol_size,
-        params.num_sub_blocks,
-        params.alignment,
-    );
-    defer enc.deinit();
-
-    var dec = try Decoder.init(allocator, enc.objectTransmissionInformation());
-    defer dec.deinit();
-
-    const k_prime = enc.sub_encoders[0].k_prime;
-
-    // Send all K source symbols + K'-K repair symbols to cover padding
-    var esi: u32 = 0;
-    while (esi < k_prime) : (esi += 1) {
-        const pkt = try enc.encode(0, esi);
-        defer allocator.free(pkt.data);
-        try dec.addPacket(pkt);
-    }
-
-    const decoded = (try dec.decode()) orelse return error.DecodeFailed;
-    defer allocator.free(decoded);
-    try std.testing.expectEqualSlices(u8, params.data, decoded);
+    try roundtripCore(std.testing.allocator, params.data, params.symbol_size, params.num_sub_blocks, params.alignment);
 }
 
 test "fuzz_roundtrip" {
@@ -94,44 +298,11 @@ test "fuzz_roundtrip" {
 fn fuzzLossRecovery(_: void, input: []const u8) anyerror!void {
     if (input.len < 7) return;
     const params = parseParams(input) orelse return;
-    const allocator = std.testing.allocator;
 
-    var enc = try Encoder.init(allocator, params.data, params.symbol_size, 1, params.alignment);
-    defer enc.deinit();
-
-    var dec = try Decoder.init(allocator, enc.objectTransmissionInformation());
-    defer dec.deinit();
-
-    const k = enc.sourceBlockK(0);
-    const k_prime = enc.sub_encoders[0].k_prime;
-
-    if (k < 2) return;
-
-    const max_drop = @max(1, k / 2);
-    const drop_count: u32 = (input[5] % max_drop) + 1;
+    const max_drop = @max(1, @as(u32, input[5]) % 128);
     const extra_repair: u32 = if (input.len > 6) input[6] % 4 else 0;
 
-    // Send source symbols, skipping the first drop_count
-    var esi: u32 = drop_count;
-    while (esi < k) : (esi += 1) {
-        const pkt = try enc.encode(0, esi);
-        defer allocator.free(pkt.data);
-        try dec.addPacket(pkt);
-    }
-
-    // Send repair symbols to compensate for dropped sources
-    const received_source = k - drop_count;
-    const repair_needed = (k_prime - received_source) + extra_repair;
-    var sent: u32 = 0;
-    while (sent < repair_needed) : (sent += 1) {
-        const pkt = try enc.encode(0, k + sent);
-        defer allocator.free(pkt.data);
-        try dec.addPacket(pkt);
-    }
-
-    const decoded = (try dec.decode()) orelse return error.DecodeFailed;
-    defer allocator.free(decoded);
-    try std.testing.expectEqualSlices(u8, params.data, decoded);
+    try lossRecoveryCore(std.testing.allocator, params.data, params.symbol_size, params.alignment, max_drop, extra_repair);
 }
 
 test "fuzz_loss_recovery" {
