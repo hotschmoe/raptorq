@@ -50,8 +50,10 @@ pub const Graph = struct {
             queue.clearRetainingCapacity();
             try queue.append(allocator, node);
 
-            while (queue.items.len > 0) {
-                const current = queue.orderedRemove(0);
+            var head: usize = 0;
+            while (head < queue.items.len) {
+                const current = queue.items[head];
+                head += 1;
                 for (self.adjacency[current].items) |neighbor| {
                     if (labels[neighbor] == sentinel) {
                         labels[neighbor] = component_id;
