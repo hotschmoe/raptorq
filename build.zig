@@ -44,6 +44,23 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Build and run benchmarks (ReleaseFast)");
     bench_step.dependOn(&run_bench.step);
 
+    // Profiler executable (forced ReleaseFast)
+    const profile_exe = b.addExecutable(.{
+        .name = "profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmark/profile.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "raptorq", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(profile_exe);
+    const run_profile = b.addRunArtifact(profile_exe);
+    const profile_step = b.step("profile", "Build and run solver profiler (ReleaseFast)");
+    profile_step.dependOn(&run_profile.step);
+
     // Unit tests (from library module)
     const mod_tests = b.addTest(.{
         .root_module = mod,

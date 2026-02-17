@@ -157,10 +157,38 @@ pub fn solve(
     var state = try SolverState.init(allocator, constraint_matrix, k_prime);
     defer state.deinit();
 
+    const do_profile = profile_enabled;
+
+    var t: [5]std.time.Instant = undefined;
+    if (do_profile) t[0] = std.time.Instant.now() catch unreachable;
     try phase1(&state);
+    if (do_profile) t[1] = std.time.Instant.now() catch unreachable;
     try phase2(&state);
+    if (do_profile) t[2] = std.time.Instant.now() catch unreachable;
     try phase3(&state);
+    if (do_profile) t[3] = std.time.Instant.now() catch unreachable;
     try applyAndRemap(&state, symbols);
+    if (do_profile) t[4] = std.time.Instant.now() catch unreachable;
+
+    if (do_profile) {
+        const p1 = t[1].since(t[0]);
+        const p2 = t[2].since(t[1]);
+        const p3 = t[3].since(t[2]);
+        const ap = t[4].since(t[3]);
+        const total = t[4].since(t[0]);
+        const w = std.fs.File.stderr().deprecatedWriter();
+        w.print("[pi_solver K'={d} L={d}] phase1={d}us phase2={d}us phase3={d}us apply={d}us total={d}us i={d} u={d}\n", .{
+            k_prime,
+            state.l,
+            p1 / 1000,
+            p2 / 1000,
+            p3 / 1000,
+            ap / 1000,
+            total / 1000,
+            state.i,
+            state.u,
+        }) catch {};
+    }
 
     const ops_slice = state.deferred_ops.toOwnedSlice(allocator) catch
         return error.OutOfMemory;
@@ -170,6 +198,8 @@ pub fn solve(
         .ops = .{ .ops = ops_slice },
     };
 }
+
+pub var profile_enabled: bool = false;
 
 /// Phase 1: Forward elimination with inactivation (Section 5.4.2.2)
 /// HDPC rows are excluded from pivot selection per Errata 2.

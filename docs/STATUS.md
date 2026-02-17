@@ -49,9 +49,18 @@ Leverage Zig's strengths for high-throughput FEC.
   `math/octets.zig`. 16 parallel byte lookups per instruction via TBL (aarch64 NEON) /
   PSHUFB (x86_64 SSSE3). `addAssign` uses `@Vector` XOR (auto-lowers on all targets).
   Scalar fallback for other architectures. (2026-02-17)
-- [ ] **Sparse matrix utilization** (former G-03) - `SparseBinaryMatrix` exists but is
-  unused. Exploit LDPC row sparsity during constraint matrix construction and early solver
-  phases to reduce memory and improve performance for large K'.
+- [ ] **P0: Bit-packed binary matrix for Phase 1** - Replace OctetMatrix with
+  DenseBinaryMatrix for binary rows in the PI solver. Enables popcount-based nonzero
+  counting (64x faster pivot selection) and u64-word XOR (4x faster elimination).
+  See docs/PERFORMANCE_ANALYSIS.md for full profiling data and implementation plan.
+- [ ] **P1: HDPC row separation** - Store HDPC rows in their own OctetMatrix. Apply
+  GF(256) FMA only where needed, not mixed into binary matrix operations.
+- [ ] **P2: Partial row updates (Errata 11)** - During Phase 1 elimination, only XOR
+  columns [i, L) instead of full row. Saves ~25% of elimination work.
+- [ ] **P3: Persistent graph** - Pre-allocate ConnectedComponentGraph once per solve
+  and reset between iterations. Eliminates per-iteration alloc/dealloc churn.
+- [ ] **P4: Logical row indirection** - Track row permutations via index arrays instead
+  of physically swapping row data. swapRows becomes O(1) instead of O(L).
 - [ ] **Memory layout optimization** - Cache-friendly data layout for symbol storage and
   matrix rows. Profile and minimize allocator pressure in hot paths.
 - [ ] **Comptime specialization** - Explore comptime-specialized paths for common K' values
@@ -83,12 +92,16 @@ Discover edge cases through randomized inputs.
 
 Separate `benchmark/` directory with reproducible, measurable scenarios.
 
-- [ ] **Throughput benchmarks** - Encode and decode MB/s across a range of K' values and
-  symbol sizes. Track regressions over time.
+- [x] **Throughput benchmarks** - Encode and decode MB/s across 12 data sizes (256B to
+  10MB). Zig benchmark at benchmark/bench.zig. (2026-02-17)
 - [ ] **Memory profiling** - Peak allocation for encode/decode by K'. Identify where
   dense matrix O(K'^2) memory dominates.
-- [ ] **Comparative benchmarks** - Side-by-side with reference implementations where
-  possible (same hardware, same parameters).
+- [x] **Comparative benchmarks** - Zig vs Rust (cberner/raptorq v2.0) side-by-side with
+  matched parameters. Rust benchmark at benchmark/rust/. Gap: 9-48x depending on K.
+  Full analysis in docs/PERFORMANCE_ANALYSIS.md. (2026-02-17)
+- [x] **Solver profiling** - Per-phase timing instrumentation in PI solver. Phase 1 is
+  85-95% of total solver time. Root cause: dense GF(256) matrix for binary data.
+  See docs/PERFORMANCE_ANALYSIS.md. (2026-02-17)
 
 ### Baremetal Target
 

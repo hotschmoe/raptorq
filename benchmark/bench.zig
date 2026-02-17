@@ -45,9 +45,11 @@ fn median(samples: []u64) u64 {
 fn runEncode(allocator: std.mem.Allocator, data: []const u8, symbol_size: u16) !void {
     var enc = try Encoder.init(allocator, data, symbol_size, 1, 4);
     defer enc.deinit();
-    const k_prime = enc.sub_encoders[0].k_prime;
+    const k = enc.sourceBlockK(0);
+    const repair_count = @max(k / 10, 1);
+    // Generate all K source symbols + 10% repair (matches Rust benchmark workload)
     var esi: u32 = 0;
-    while (esi < k_prime) : (esi += 1) {
+    while (esi < k + repair_count) : (esi += 1) {
         const pkt = try enc.encode(0, esi);
         allocator.free(pkt.data);
     }
