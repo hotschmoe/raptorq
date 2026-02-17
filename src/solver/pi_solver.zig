@@ -13,7 +13,10 @@ const std = @import("std");
 const Octet = @import("../math/octet.zig").Octet;
 const OctetMatrix = @import("../matrix/octet_matrix.zig").OctetMatrix;
 const DenseBinaryMatrix = @import("../matrix/dense_binary_matrix.zig").DenseBinaryMatrix;
-const Symbol = @import("../codec/symbol.zig").Symbol;
+const ConstraintMatrices = @import("../matrix/constraint_matrix.zig").ConstraintMatrices;
+const symbol_mod = @import("../codec/symbol.zig");
+const Symbol = symbol_mod.Symbol;
+const SymbolBuffer = symbol_mod.SymbolBuffer;
 const OperationVector = @import("../codec/operation_vector.zig").OperationVector;
 const SymbolOp = @import("../codec/operation_vector.zig").SymbolOp;
 const ConnectedComponentGraph = @import("graph.zig").ConnectedComponentGraph;
@@ -21,32 +24,30 @@ const systematic_constants = @import("../tables/systematic_constants.zig");
 
 pub const SolverError = error{ SingularMatrix, OutOfMemory };
 
-pub const IntermediateSymbolResult = struct {
-    symbols: []Symbol,
-    ops: OperationVector,
-};
-
 const SolverState = struct {
-    binary: DenseBinaryMatrix, // (L-H) rows x L cols, bit-packed
-    hdpc: *OctetMatrix, // original matrix, used for HDPC rows
-    graph: ConnectedComponentGraph, // persistent, reset per r=2 iteration
+    binary: *DenseBinaryMatrix, // borrowed from ConstraintMatrices
+    hdpc: *OctetMatrix, // borrowed from ConstraintMatrices (H rows x L cols)
+    graph: ConnectedComponentGraph,
     l: u32,
-    d: []u32, // row permutation: d[physical] = original row index
-    c: []u32, // col permutation: c[physical] = original col index
-    i: u32, // Phase 1 progress counter
-    u: u32, // inactivated column count
-    hdpc_start: u32, // L - H (first HDPC row index)
+    d: []u32,
+    c: []u32,
+    i: u32,
+    u: u32,
+    hdpc_start: u32, // L - H (first logical HDPC row index)
     deferred_ops: std.ArrayList(SymbolOp),
     original_degree: []u16,
+    v_degree: []u16, // current nonzeros in V-region [i, L-u) per binary row
+    log_to_phys: []u32, // logical binary row -> physical storage row
+    phys_to_log: []u32, // physical storage row -> logical binary row
     allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator, a: *OctetMatrix, k_prime: u32) SolverError!SolverState {
+    fn init(allocator: std.mem.Allocator, cm: *ConstraintMatrices, k_prime: u32) SolverError!SolverState {
         const si = systematic_constants.findSystematicIndex(k_prime) orelse
             return error.SingularMatrix;
         const s = si.s;
         const h = si.h;
-        const l = a.numRows();
         const w = si.w;
+        const l = cm.l;
         const hdpc_start = l - h;
 
         const d = allocator.alloc(u32, l) catch return error.OutOfMemory;
@@ -55,42 +56,33 @@ const SolverState = struct {
         errdefer allocator.free(c_arr);
         const orig_deg = allocator.alloc(u16, l) catch return error.OutOfMemory;
         errdefer allocator.free(orig_deg);
+        const v_deg = allocator.alloc(u16, hdpc_start) catch return error.OutOfMemory;
+        errdefer allocator.free(v_deg);
+        const l2p = allocator.alloc(u32, hdpc_start) catch return error.OutOfMemory;
+        errdefer allocator.free(l2p);
+        const p2l = allocator.alloc(u32, hdpc_start) catch return error.OutOfMemory;
+        errdefer allocator.free(p2l);
 
-        for (d, 0..) |*v, idx| v.* = @intCast(idx);
+        // d[] maps logical row -> D vector index
+        // Binary rows [0, S): LDPC constraints -> D vector [0, S)
+        for (0..s) |j| d[j] = @intCast(j);
+        // Binary rows [S, L-H): LT/data rows -> D vector [S+H, L)
+        for (0..hdpc_start - s) |j| d[s + j] = @intCast(s + h + j);
+        // HDPC rows [L-H, L): constraints -> D vector [S, S+H)
+        for (0..h) |j| d[hdpc_start + j] = @intCast(s + j);
+
         for (c_arr, 0..) |*v, idx| v.* = @intCast(idx);
         @memset(orig_deg, 0);
 
-        // Move HDPC rows from [S, S+H) to [L-H, L) in OctetMatrix
-        if (s != hdpc_start) {
-            var j: u32 = 0;
-            while (j < h) : (j += 1) {
-                a.swapRows(s + j, hdpc_start + j);
-                std.mem.swap(u32, &d[s + j], &d[hdpc_start + j]);
-            }
-        }
-
-        // Build DenseBinaryMatrix from OctetMatrix rows [0, hdpc_start)
-        var binary = DenseBinaryMatrix.init(allocator, hdpc_start, l) catch
-            return error.OutOfMemory;
-        errdefer binary.deinit();
-
+        // Initial V-region is [0, W) since i=0, u=L-W
         {
             var row: u32 = 0;
             while (row < hdpc_start) : (row += 1) {
-                var col: u32 = 0;
-                while (col < l) : (col += 1) {
-                    if (!a.get(row, col).isZero()) {
-                        binary.set(row, col, true);
-                    }
-                }
-            }
-        }
-
-        // Compute original degree from binary matrix (popcount)
-        {
-            var row: u32 = 0;
-            while (row < hdpc_start) : (row += 1) {
-                orig_deg[row] = @intCast(binary.countOnesInRange(row, 0, w));
+                const deg: u16 = @intCast(cm.binary.countOnesInRange(row, 0, w));
+                orig_deg[row] = deg;
+                v_deg[row] = deg;
+                l2p[row] = row;
+                p2l[row] = row;
             }
         }
 
@@ -99,8 +91,8 @@ const SolverState = struct {
         errdefer graph.deinit(allocator);
 
         return SolverState{
-            .binary = binary,
-            .hdpc = a,
+            .binary = &cm.binary,
+            .hdpc = &cm.hdpc,
             .graph = graph,
             .l = l,
             .d = d,
@@ -110,32 +102,38 @@ const SolverState = struct {
             .hdpc_start = hdpc_start,
             .deferred_ops = .empty,
             .original_degree = orig_deg,
+            .v_degree = v_deg,
+            .log_to_phys = l2p,
+            .phys_to_log = p2l,
             .allocator = allocator,
         };
     }
 
     fn deinit(self: *SolverState) void {
-        self.binary.deinit();
         self.graph.deinit(self.allocator);
         self.allocator.free(self.d);
         self.allocator.free(self.c);
         self.allocator.free(self.original_degree);
+        self.allocator.free(self.v_degree);
+        self.allocator.free(self.log_to_phys);
+        self.allocator.free(self.phys_to_log);
         self.deferred_ops.deinit(self.allocator);
     }
 
     fn swapRows(self: *SolverState, r1: u32, r2: u32) void {
         if (r1 == r2) return;
-        // Both in binary region
         if (r1 < self.hdpc_start and r2 < self.hdpc_start) {
-            self.binary.swapRows(r1, r2);
-        }
-        // Both in HDPC region
-        else if (r1 >= self.hdpc_start and r2 >= self.hdpc_start) {
-            self.hdpc.swapRows(r1, r2);
-        }
-        // Cross-region swap (should not occur in Phase 1 after HDPC relocation,
-        // but Phase 2 may swap freely)
-        else {
+            // O(1) via indirection -- no physical data movement
+            const p1 = self.log_to_phys[r1];
+            const p2 = self.log_to_phys[r2];
+            self.log_to_phys[r1] = p2;
+            self.log_to_phys[r2] = p1;
+            self.phys_to_log[p1] = r2;
+            self.phys_to_log[p2] = r1;
+            std.mem.swap(u16, &self.v_degree[r1], &self.v_degree[r2]);
+        } else if (r1 >= self.hdpc_start and r2 >= self.hdpc_start) {
+            self.hdpc.swapRows(r1 - self.hdpc_start, r2 - self.hdpc_start);
+        } else {
             self.swapRowsCrossRegion(r1, r2);
         }
         std.mem.swap(u32, &self.d[r1], &self.d[r2]);
@@ -143,28 +141,72 @@ const SolverState = struct {
     }
 
     fn swapRowsCrossRegion(self: *SolverState, r1: u32, r2: u32) void {
-        const bin_row = if (r1 < self.hdpc_start) r1 else r2;
+        const bin_log = if (r1 < self.hdpc_start) r1 else r2;
         const hdpc_row = if (r1 >= self.hdpc_start) r1 else r2;
+        const hdpc_local = hdpc_row - self.hdpc_start;
+        const bin_phys = self.log_to_phys[bin_log];
 
-        // Exchange element by element across the two matrix representations
         var col: u32 = 0;
         while (col < self.l) : (col += 1) {
-            const bin_val = self.binary.get(bin_row, col);
-            const hdpc_val = self.hdpc.get(hdpc_row, col);
-            self.binary.set(bin_row, col, !hdpc_val.isZero());
-            self.hdpc.set(hdpc_row, col, if (bin_val) Octet.ONE else Octet.ZERO);
+            const bin_val = self.binary.get(bin_phys, col);
+            const hdpc_val = self.hdpc.get(hdpc_local, col);
+            self.binary.set(bin_phys, col, !hdpc_val.isZero());
+            self.hdpc.set(hdpc_local, col, if (bin_val) Octet.ONE else Octet.ZERO);
         }
+        // Recompute v_degree for the binary row after its data changed
+        const v_start = self.i;
+        const v_end = self.l - self.u;
+        self.v_degree[bin_log] = @intCast(self.binary.countOnesInRange(bin_phys, v_start, v_end));
+    }
+
+    // Access helpers through indirection layer
+    inline fn binaryGet(self: *const SolverState, logical_row: u32, col: u32) bool {
+        return self.binary.get(self.log_to_phys[logical_row], col);
+    }
+
+    inline fn binaryRowSliceConst(self: *const SolverState, logical_row: u32) []const u64 {
+        return self.binary.rowSliceConst(self.log_to_phys[logical_row]);
+    }
+
+    inline fn binaryXorRowRange(self: *SolverState, src_log: u32, dst_log: u32, start_col: u32) void {
+        self.binary.xorRowRange(self.log_to_phys[src_log], self.log_to_phys[dst_log], start_col);
+    }
+
+    inline fn binaryCountOnesInRange(self: *const SolverState, logical_row: u32, start: u32, end: u32) u32 {
+        return self.binary.countOnesInRange(self.log_to_phys[logical_row], start, end);
+    }
+
+    inline fn binaryNonzeroColsInRange(self: *const SolverState, logical_row: u32, start: u32, end: u32, buf: []u32) u32 {
+        return self.binary.nonzeroColsInRange(self.log_to_phys[logical_row], start, end, buf);
     }
 
     fn swapCols(self: *SolverState, c1: u32, c2: u32) void {
         if (c1 == c2) return;
-        self.binary.swapCols(c1, c2, self.i);
-        var r = self.hdpc_start;
-        while (r < self.l) : (r += 1) {
+        // Swap across ALL physical rows (indirection means any physical row
+        // could map to an active logical row)
+        self.binary.swapCols(c1, c2, 0);
+        const h = self.l - self.hdpc_start;
+        var r: u32 = 0;
+        while (r < h) : (r += 1) {
             const row_bytes = self.hdpc.rowSlice(r);
             std.mem.swap(u8, &row_bytes[c1], &row_bytes[c2]);
         }
         std.mem.swap(u32, &self.c[c1], &self.c[c2]);
+    }
+
+    /// Move a column from V to U: decrement v_degree, swap to boundary, grow u.
+    fn inactivateColumn(self: *SolverState, col: u32) void {
+        // Decrement v_degree for active rows that have a 1 in this column
+        var row: u32 = self.i;
+        while (row < self.hdpc_start) : (row += 1) {
+            if (self.binaryGet(row, col)) {
+                self.v_degree[row] -= 1;
+            }
+        }
+        // Swap column to boundary position and shrink V
+        const new_boundary = self.l - self.u - 1;
+        self.swapCols(col, new_boundary);
+        self.u += 1;
     }
 
     fn addOp(self: *SolverState, op: SymbolOp) SolverError!void {
@@ -173,14 +215,15 @@ const SolverState = struct {
 };
 
 /// Solve for intermediate symbols using inactivation decoding.
+/// Mutates buf in-place so that buf[c[j]] = intermediate_symbol[j].
 /// Implements RFC 6330 Section 5.4.2.
 pub fn solve(
     allocator: std.mem.Allocator,
-    constraint_matrix: *OctetMatrix,
-    symbols: []Symbol,
+    cm: *ConstraintMatrices,
+    buf: *SymbolBuffer,
     k_prime: u32,
-) SolverError!IntermediateSymbolResult {
-    var state = try SolverState.init(allocator, constraint_matrix, k_prime);
+) SolverError!void {
+    var state = try SolverState.init(allocator, cm, k_prime);
     defer state.deinit();
 
     const do_profile = profile_enabled;
@@ -193,7 +236,7 @@ pub fn solve(
     if (do_profile) t[2] = std.time.Instant.now() catch unreachable;
     try phase3(&state);
     if (do_profile) t[3] = std.time.Instant.now() catch unreachable;
-    try applyAndRemap(&state, symbols);
+    try applyAndRemap(&state, buf);
     if (do_profile) t[4] = std.time.Instant.now() catch unreachable;
 
     if (do_profile) {
@@ -215,61 +258,48 @@ pub fn solve(
             state.u,
         }) catch {};
     }
-
-    const ops_slice = state.deferred_ops.toOwnedSlice(allocator) catch
-        return error.OutOfMemory;
-
-    return .{
-        .symbols = symbols,
-        .ops = .{ .ops = ops_slice },
-    };
 }
 
 pub var profile_enabled: bool = false;
 
-/// Phase 1: Forward elimination with inactivation (Section 5.4.2.2)
-/// HDPC rows are excluded from pivot selection per Errata 2.
-/// Binary rows use bit-packed DenseBinaryMatrix for fast popcount and XOR.
-/// HDPC rows use GF(256) FMA via set-bit iteration on the binary pivot row.
 fn phase1(state: *SolverState) SolverError!void {
     const l = state.l;
     const hdpc_start = state.hdpc_start;
 
     while (state.i + state.u < l) {
-        const v_end = l - state.u;
-
         const selection = try selectPivotRow(state, hdpc_start);
 
         state.swapRows(state.i, selection.row);
         const min_r = selection.nonzeros;
 
-        // Column swaps: first nonzero to diagonal, remaining r-1 to U boundary
         var nz_buf: [2]u32 = undefined;
-        _ = state.binary.nonzeroColsInRange(state.i, state.i, v_end, &nz_buf);
+        _ = state.binaryNonzeroColsInRange(state.i, state.i, l - state.u, &nz_buf);
 
+        // Swap first nonzero column to the pivot position (stays in V)
         state.swapCols(state.i, nz_buf[0]);
+
         if (min_r == 2) {
-            // If the second nonzero was at the diagonal, it moved to nz_buf[0] during the swap above
+            // Inactivate the second nonzero column (move from V to U)
             const second_col = if (nz_buf[1] == state.i) nz_buf[0] else nz_buf[1];
-            state.swapCols(v_end - 1, second_col);
-            state.u += 1;
+            state.inactivateColumn(second_col);
         } else if (min_r >= 3) {
-            var inactivated: u32 = 0;
+            // Inactivate all nonzero columns except the pivot column
             var c_iter = state.i + 1;
-            var current_v_end = v_end;
-            while (c_iter < current_v_end) {
-                if (state.binary.get(state.i, c_iter)) {
-                    current_v_end -= 1;
-                    state.swapCols(c_iter, current_v_end);
-                    inactivated += 1;
+            while (c_iter < l - state.u) {
+                if (state.binaryGet(state.i, c_iter)) {
+                    state.inactivateColumn(c_iter);
+                    // Don't advance c_iter: the swapped-in column needs checking
                 } else {
                     c_iter += 1;
                 }
             }
-            state.u += inactivated;
         }
 
         try eliminateColumn(state, state.i, hdpc_start);
+
+        // Column state.i leaves V as i advances. After eliminateColumn, only
+        // the pivot row has a 1 at column state.i; all others were zeroed.
+        state.v_degree[state.i] -|= 1;
 
         state.i += 1;
     }
@@ -277,20 +307,16 @@ fn phase1(state: *SolverState) SolverError!void {
 
 const PivotSelection = struct { row: u32, nonzeros: u32 };
 
-/// Select the best pivot row from non-HDPC rows in [i, hdpc_start).
-/// Uses popcount on bit-packed rows (~64x faster than byte scan).
 fn selectPivotRow(state: *SolverState, hdpc_start: u32) SolverError!PivotSelection {
-    const v_start = state.i;
-    const v_end = state.l - state.u;
-
     var min_r: u32 = std.math.maxInt(u32);
     var chosen_row: u32 = 0;
     var chosen_orig_deg: u16 = std.math.maxInt(u16);
     var found = false;
 
+    // Scan v_degree[] -- O(hdpc_start - i) u16 comparisons, no popcount
     var row = state.i;
     while (row < hdpc_start) : (row += 1) {
-        const r_val = state.binary.countOnesInRange(row, v_start, v_end);
+        const r_val: u32 = state.v_degree[row];
         if (r_val == 0) continue;
         if (r_val < min_r or
             (r_val == min_r and state.original_degree[row] < chosen_orig_deg))
@@ -299,6 +325,7 @@ fn selectPivotRow(state: *SolverState, hdpc_start: u32) SolverError!PivotSelecti
             chosen_row = row;
             chosen_orig_deg = state.original_degree[row];
             found = true;
+            if (min_r == 1) break;
         }
     }
 
@@ -313,28 +340,52 @@ fn selectPivotRow(state: *SolverState, hdpc_start: u32) SolverError!PivotSelecti
     return .{ .row = chosen_row, .nonzeros = min_r };
 }
 
-/// Eliminate a pivot column from all rows below it.
-/// Binary rows: XOR row ranges. HDPC rows: FMA via set-bit iteration on binary pivot.
 fn eliminateColumn(state: *SolverState, col: u32, hdpc_start: u32) SolverError!void {
-    // Binary rows below pivot
+    const pivot_phys = state.log_to_phys[col];
+    const v_start = col; // after this pivot is processed, V starts at col+1
+    const v_end = state.l - state.u;
+
     var row = col + 1;
     while (row < hdpc_start) : (row += 1) {
-        if (state.binary.get(row, col)) {
-            state.binary.xorRowRange(col, row, col);
+        const row_phys = state.log_to_phys[row];
+        if (state.binary.get(row_phys, col)) {
+            // Compute overlap in V-region BEFORE XOR for incremental v_degree update
+            // After XOR: new_v_deg = old_v_deg + pivot_v_deg - 2*overlap
+            // But we must exclude the pivot column itself (col = v_start) since it
+            // will become part of the solved diagonal after this step.
+            // The effective V-region for the next iteration is [col+1, v_end).
+            const overlap = state.binary.andCountOnesInRange(row_phys, pivot_phys, v_start, v_end);
+            const pivot_nz = state.binary.countOnesInRange(pivot_phys, v_start, v_end);
+
+            state.binary.xorRowRange(pivot_phys, row_phys, col);
+
+            // Update v_degree: XOR flips shared bits off and unshared bits on
+            const old_deg = state.v_degree[row];
+            state.v_degree[row] = @intCast(@as(u32, old_deg) + pivot_nz - 2 * overlap);
+
             try state.addOp(.{ .add_assign = .{
                 .src = state.d[col],
                 .dst = state.d[row],
             } });
         }
     }
-    // HDPC rows: pivot row is binary, so FMA simplifies to XOR-where-set
-    const pivot_row_data = state.binary.rowSliceConst(col);
-    row = hdpc_start;
-    while (row < state.l) : (row += 1) {
-        const factor = state.hdpc.get(row, col);
+
+    // After pivot column is used, it leaves V. Decrement v_degree for rows
+    // that have a 1 in this column (they were just XOR'd, so only pivot has it).
+    // Actually, the pivot row itself moves to the diagonal, and all other rows
+    // had col zeroed by the XOR. But v_degree already accounts for col being
+    // in [v_start, v_end). Since i advances after this call, col leaves V
+    // naturally. We account for this in phase1 by noting i increments.
+
+    const pivot_row_data = state.binary.rowSliceConst(pivot_phys);
+    const h = state.l - hdpc_start;
+    var hdpc_r: u32 = 0;
+    while (hdpc_r < h) : (hdpc_r += 1) {
+        const logical_row = hdpc_start + hdpc_r;
+        const factor = state.hdpc.get(hdpc_r, col);
         if (factor.isZero()) continue;
 
-        const hdpc_row_bytes = state.hdpc.rowSlice(row);
+        const hdpc_row_bytes = state.hdpc.rowSlice(hdpc_r);
         for (pivot_row_data, 0..) |word, wi| {
             var bits = word;
             while (bits != 0) {
@@ -349,14 +400,12 @@ fn eliminateColumn(state: *SolverState, col: u32, hdpc_start: u32) SolverError!v
 
         try state.addOp(.{ .fma = .{
             .src = state.d[col],
-            .dst = state.d[row],
+            .dst = state.d[logical_row],
             .scalar = factor,
         } });
     }
 }
 
-/// Graph substep for r=2 rows: find largest connected component.
-/// Uses persistent union-find graph (reset between iterations).
 fn graphSubstep(state: *SolverState, hdpc_start: u32) ?u32 {
     const v_start = state.i;
     const v_end = state.l - state.u;
@@ -367,9 +416,9 @@ fn graphSubstep(state: *SolverState, hdpc_start: u32) ?u32 {
 
     var row = state.i;
     while (row < hdpc_start) : (row += 1) {
-        if (state.binary.countOnesInRange(row, v_start, v_end) != 2) continue;
+        if (state.v_degree[row] != 2) continue;
         var cols: [2]u32 = undefined;
-        if (state.binary.nonzeroColsInRange(row, v_start, v_end, &cols) == 2) {
+        if (state.binaryNonzeroColsInRange(row, v_start, v_end, &cols) == 2) {
             state.graph.addEdge(cols[0] - v_start, cols[1] - v_start);
         }
     }
@@ -379,54 +428,52 @@ fn graphSubstep(state: *SolverState, hdpc_start: u32) ?u32 {
 
     row = state.i;
     while (row < hdpc_start) : (row += 1) {
-        if (state.binary.countOnesInRange(row, v_start, v_end) != 2) continue;
-        if (state.binary.get(row, target_col)) return row;
+        if (state.v_degree[row] != 2) continue;
+        if (state.binaryGet(row, target_col)) return row;
     }
 
     return null;
 }
 
-/// Phase 2: Solve u x u inactivated submatrix (Section 5.4.2.3)
-/// Builds a temporary OctetMatrix from binary+HDPC state for columns [i, L),
-/// runs GF(256) Gaussian elimination, then applies results back.
 fn phase2(state: *SolverState) SolverError!void {
     const l = state.l;
     const i_val = state.i;
     const num_cols = l - i_val;
     if (num_cols == 0) return;
 
-    // Build temporary OctetMatrix: L rows x num_cols columns (cols [i, L))
     var temp = OctetMatrix.init(state.allocator, l, num_cols) catch
         return error.OutOfMemory;
     defer temp.deinit();
 
-    // Fill from binary rows [0, hdpc_start)
+    // Fill from binary rows [0, hdpc_start) using indirection
     {
         var row: u32 = 0;
         while (row < state.hdpc_start) : (row += 1) {
+            const phys = state.log_to_phys[row];
             var col: u32 = 0;
             while (col < num_cols) : (col += 1) {
-                if (state.binary.get(row, i_val + col)) {
+                if (state.binary.get(phys, i_val + col)) {
                     temp.set(row, col, Octet.ONE);
                 }
             }
         }
     }
-    // Fill from HDPC rows [hdpc_start, L) via slice copy
+    // Fill from HDPC rows
     {
-        var row = state.hdpc_start;
-        while (row < l) : (row += 1) {
-            const src = state.hdpc.rowSliceConst(row);
-            @memcpy(temp.rowSlice(row), src[i_val..][0..num_cols]);
+        const h = l - state.hdpc_start;
+        var hdpc_r: u32 = 0;
+        while (hdpc_r < h) : (hdpc_r += 1) {
+            const logical_row = state.hdpc_start + hdpc_r;
+            const src = state.hdpc.rowSliceConst(hdpc_r);
+            @memcpy(temp.rowSlice(logical_row), src[i_val..][0..num_cols]);
         }
     }
 
-    // GF(256) Gaussian elimination on temp
+    // GF(256) Gaussian elimination
     var col: u32 = 0;
     while (col < num_cols) : (col += 1) {
         const abs_col = i_val + col;
 
-        // Find pivot in [col, L) within temp
         const pivot_row = blk: {
             var r = abs_col;
             while (r < l) : (r += 1) {
@@ -435,13 +482,11 @@ fn phase2(state: *SolverState) SolverError!void {
             return error.SingularMatrix;
         };
 
-        // Swap pivot row to diagonal position
         if (pivot_row != abs_col) {
             temp.swapRows(abs_col, pivot_row);
             state.swapRows(abs_col, pivot_row);
         }
 
-        // Scale pivot row to 1
         const pivot_val = temp.get(abs_col, col);
         if (!pivot_val.isOne()) {
             const inv = pivot_val.inverse();
@@ -452,7 +497,6 @@ fn phase2(state: *SolverState) SolverError!void {
             } });
         }
 
-        // Eliminate from ALL rows
         var r: u32 = 0;
         while (r < l) : (r += 1) {
             if (r == abs_col) continue;
@@ -468,30 +512,29 @@ fn phase2(state: *SolverState) SolverError!void {
         }
     }
 
-    // Write results back to binary matrix for rows [0, hdpc_start):
-    // After Phase 2 GE, columns [i, L) should be identity on diagonal
-    // and zero elsewhere. Update binary matrix to reflect this.
+    // Write back to binary rows using indirection
     {
         var row: u32 = 0;
         while (row < state.hdpc_start) : (row += 1) {
+            const phys = state.log_to_phys[row];
             var c: u32 = 0;
             while (c < num_cols) : (c += 1) {
-                state.binary.set(row, i_val + c, !temp.get(row, c).isZero());
+                state.binary.set(phys, i_val + c, !temp.get(row, c).isZero());
             }
         }
     }
-    // Write back to HDPC rows in OctetMatrix via slice copy
+    // Write back to HDPC rows
     {
-        var row = state.hdpc_start;
-        while (row < l) : (row += 1) {
-            const src = temp.rowSliceConst(row);
-            @memcpy(state.hdpc.rowSlice(row)[i_val..][0..num_cols], src);
+        const h = l - state.hdpc_start;
+        var hdpc_r: u32 = 0;
+        while (hdpc_r < h) : (hdpc_r += 1) {
+            const logical_row = state.hdpc_start + hdpc_r;
+            const src = temp.rowSliceConst(logical_row);
+            @memcpy(state.hdpc.rowSlice(hdpc_r)[i_val..][0..num_cols], src);
         }
     }
 }
 
-/// Phase 3: Back-substitution on upper-triangular first-i block (Section 5.4.2.4)
-/// All rows [0, i) are binary. Back-substitution uses XOR only.
 fn phase3(state: *SolverState) SolverError!void {
     if (state.i <= 1) return;
 
@@ -500,8 +543,8 @@ fn phase3(state: *SolverState) SolverError!void {
         col -= 1;
         var row: u32 = 0;
         while (row < col) : (row += 1) {
-            if (state.binary.get(row, col)) {
-                state.binary.xorRow(col, row);
+            if (state.binaryGet(row, col)) {
+                state.binaryXorRowRange(col, row, 0);
                 try state.addOp(.{ .add_assign = .{
                     .src = state.d[col],
                     .dst = state.d[row],
@@ -511,19 +554,18 @@ fn phase3(state: *SolverState) SolverError!void {
     }
 }
 
-/// Apply all deferred operations to symbols and remap via permutations.
-fn applyAndRemap(state: *SolverState, symbols: []Symbol) SolverError!void {
+fn applyAndRemap(state: *SolverState, buf: *SymbolBuffer) SolverError!void {
     const ops = OperationVector{ .ops = state.deferred_ops.items };
-    ops.apply(symbols);
+    ops.applyBuf(buf);
 
-    const temp = state.allocator.alloc(Symbol, state.l) catch
+    var temp = SymbolBuffer.init(state.allocator, state.l, buf.symbol_size) catch
         return error.OutOfMemory;
-    defer state.allocator.free(temp);
+    defer temp.deinit();
 
-    @memcpy(temp, symbols[0..state.l]);
     for (0..state.l) |j| {
-        symbols[state.c[j]] = temp[state.d[j]];
+        @memcpy(temp.get(@intCast(state.c[j])), buf.getConst(@intCast(state.d[j])));
     }
+    @memcpy(buf.data[0..@as(usize, state.l) * buf.symbol_size], temp.data[0..@as(usize, state.l) * buf.symbol_size]);
 }
 
 test "pi_solver solves real constraint matrix K'=10" {
@@ -532,26 +574,21 @@ test "pi_solver solves real constraint matrix K'=10" {
 
     const k_prime: u32 = 10;
 
-    var a = try constraint_matrix_mod.buildConstraintMatrix(allocator, k_prime);
-    defer a.deinit();
+    var cm = try constraint_matrix_mod.buildConstraintMatrices(allocator, k_prime);
+    defer cm.deinit();
 
-    var syms: [27]Symbol = undefined;
-    var init_count: usize = 0;
-    defer for (syms[0..init_count]) |s| s.deinit();
+    var buf = try SymbolBuffer.init(allocator, 27, 4);
+    defer buf.deinit();
 
-    for (&syms, 0..) |*s, idx| {
-        s.* = try Symbol.init(allocator, 4);
-        init_count += 1;
-        s.data[0] = @intCast(idx + 1);
+    for (0..27) |idx| {
+        buf.get(@intCast(idx))[0] = @intCast(idx + 1);
     }
 
-    const result = try solve(allocator, &a, &syms, k_prime);
-    defer allocator.free(result.ops.ops);
+    try solve(allocator, &cm, &buf, k_prime);
 
-    // Verify solve produced non-trivial output
     var all_zero = true;
-    for (syms[0..27]) |s| {
-        if (s.data[0] != 0) {
+    for (0..27) |idx| {
+        if (buf.getConst(@intCast(idx))[0] != 0) {
             all_zero = false;
             break;
         }
@@ -564,27 +601,25 @@ test "pi_solver singular detection" {
     const constraint_matrix_mod = @import("../matrix/constraint_matrix.zig");
 
     const k_prime: u32 = 10;
-    const si = systematic_constants.findSystematicIndex(k_prime).?;
-    const l: u32 = k_prime + si.s + si.h;
 
-    var a = try constraint_matrix_mod.buildConstraintMatrix(allocator, k_prime);
-    defer a.deinit();
+    var cm = try constraint_matrix_mod.buildConstraintMatrices(allocator, k_prime);
+    defer cm.deinit();
 
-    // Zero out a column to make it singular
+    // Zero out column 0 in both binary and hdpc to make it singular
+    const l = cm.l;
+    const hdpc_start = l - cm.h;
     var row: u32 = 0;
-    while (row < l) : (row += 1) {
-        a.set(row, 0, Octet.ZERO);
+    while (row < hdpc_start) : (row += 1) {
+        cm.binary.set(row, 0, false);
+    }
+    row = 0;
+    while (row < cm.h) : (row += 1) {
+        cm.hdpc.set(row, 0, Octet.ZERO);
     }
 
-    var syms: [27]Symbol = undefined;
-    var init_count: usize = 0;
-    defer for (syms[0..init_count]) |s| s.deinit();
+    var buf = try SymbolBuffer.init(allocator, 27, 4);
+    defer buf.deinit();
 
-    for (&syms) |*s| {
-        s.* = try Symbol.init(allocator, 4);
-        init_count += 1;
-    }
-
-    const result = solve(allocator, &a, &syms, k_prime);
+    const result = solve(allocator, &cm, &buf, k_prime);
     try std.testing.expectError(error.SingularMatrix, result);
 }

@@ -71,6 +71,11 @@ pub const DenseBinaryMatrix = struct {
         return gf2.countOnesInRange(self.rowSliceConst(row), start_col, end_col);
     }
 
+    /// Count bits set in both row_a AND row_b within [start_col, end_col).
+    pub fn andCountOnesInRange(self: DenseBinaryMatrix, row_a: u32, row_b: u32, start_col: u32, end_col: u32) u32 {
+        return gf2.andCountOnesInRange(self.rowSliceConst(row_a), self.rowSliceConst(row_b), start_col, end_col);
+    }
+
     /// Write column indices of set bits in [start_col, end_col) into buf.
     /// Returns the number of indices written.
     pub fn nonzeroColsInRange(self: DenseBinaryMatrix, row: u32, start_col: u32, end_col: u32, buf: []u32) u32 {

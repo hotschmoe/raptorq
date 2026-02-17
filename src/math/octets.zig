@@ -21,6 +21,11 @@ const has_ssse3 = switch (builtin.cpu.arch) {
     else => false,
 };
 
+const has_avx2 = switch (builtin.cpu.arch) {
+    .x86_64, .x86 => std.Target.x86.featureSetHas(builtin.cpu.features, .avx2),
+    else => false,
+};
+
 const use_simd = has_neon or has_ssse3;
 
 const NibbleTables = struct {
@@ -65,6 +70,16 @@ fn tableLookup16(table: @Vector(16, u8), indices: @Vector(16, u8)) @Vector(16, u
     }
 }
 
+fn tableLookup32(table: @Vector(16, u8), indices: @Vector(32, u8)) @Vector(32, u8) {
+    const table_arr: [16]u8 = table;
+    const wide_table: @Vector(32, u8) = table_arr ++ table_arr;
+    return asm ("vpshufb %[idx], %[tbl], %[out]"
+        : [out] "=x" (-> @Vector(32, u8)),
+        : [tbl] "x" (wide_table),
+          [idx] "x" (indices),
+    );
+}
+
 const mask_0f: @Vector(16, u8) = @splat(0x0F);
 const shift_4: @Vector(16, u3) = @splat(4);
 
@@ -76,6 +91,33 @@ fn simdMulChunks(dst: []u8, tables: NibbleTables) usize {
         const lo_prod = tableLookup16(tables.lo, d & mask_0f);
         const hi_prod = tableLookup16(tables.hi, d >> shift_4);
         dst[i..][0..16].* = lo_prod ^ hi_prod;
+    }
+    return i;
+}
+
+fn simdMulChunks32(dst: []u8, tables: NibbleTables) usize {
+    var i: usize = 0;
+    while (i + 32 <= dst.len) : (i += 32) {
+        const d: @Vector(32, u8) = dst[i..][0..32].*;
+        const mask: @Vector(32, u8) = @splat(0x0F);
+        const shift: @Vector(32, u3) = @splat(4);
+        const lo_prod = tableLookup32(tables.lo, d & mask);
+        const hi_prod = tableLookup32(tables.hi, d >> shift);
+        dst[i..][0..32].* = lo_prod ^ hi_prod;
+    }
+    return i;
+}
+
+fn simdFmaChunks32(dst: []u8, src: []const u8, tables: NibbleTables) usize {
+    var i: usize = 0;
+    while (i + 32 <= dst.len) : (i += 32) {
+        const s: @Vector(32, u8) = src[i..][0..32].*;
+        const mask: @Vector(32, u8) = @splat(0x0F);
+        const shift: @Vector(32, u3) = @splat(4);
+        const lo_prod = tableLookup32(tables.lo, s & mask);
+        const hi_prod = tableLookup32(tables.hi, s >> shift);
+        const d: @Vector(32, u8) = dst[i..][0..32].*;
+        dst[i..][0..32].* = d ^ (lo_prod ^ hi_prod);
     }
     return i;
 }
@@ -96,6 +138,13 @@ fn simdFmaChunks(dst: []u8, src: []const u8, tables: NibbleTables) usize {
 /// dst[i] ^= src[i] for all i
 pub fn addAssign(dst: []u8, src: []const u8) void {
     var i: usize = 0;
+    if (has_avx2) {
+        while (i + 32 <= dst.len) : (i += 32) {
+            const s: @Vector(32, u8) = src[i..][0..32].*;
+            const d: @Vector(32, u8) = dst[i..][0..32].*;
+            dst[i..][0..32].* = d ^ s;
+        }
+    }
     while (i + 16 <= dst.len) : (i += 16) {
         const s: @Vector(16, u8) = src[i..][0..16].*;
         const d: @Vector(16, u8) = dst[i..][0..16].*;
@@ -117,7 +166,10 @@ pub fn mulAssignScalar(dst: []u8, scalar: Octet) void {
     var i: usize = 0;
     if (use_simd) {
         const tables = buildNibbleTables(scalar.value);
-        i = simdMulChunks(dst, tables);
+        if (has_avx2) {
+            i = simdMulChunks32(dst, tables);
+        }
+        i += simdMulChunks(dst[i..], tables);
     }
 
     const log_scalar = @as(u16, octet_tables.OCT_LOG[scalar.value]);
@@ -139,7 +191,10 @@ pub fn fmaSlice(dst: []u8, src: []const u8, scalar: Octet) void {
     var i: usize = 0;
     if (use_simd) {
         const tables = buildNibbleTables(scalar.value);
-        i = simdFmaChunks(dst, src, tables);
+        if (has_avx2) {
+            i = simdFmaChunks32(dst, src, tables);
+        }
+        i += simdFmaChunks(dst[i..], src[i..], tables);
     }
 
     const log_scalar = @as(u16, octet_tables.OCT_LOG[scalar.value]);

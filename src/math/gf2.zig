@@ -1,10 +1,24 @@
 // GF(2) binary field operations on u64-packed bit vectors
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+const has_avx2 = switch (builtin.cpu.arch) {
+    .x86_64, .x86 => std.Target.x86.featureSetHas(builtin.cpu.features, .avx2),
+    else => false,
+};
 
 /// dst[i] ^= src[i] for all i
 pub fn xorSlice(dst: []u64, src: []const u64) void {
-    for (dst, src) |*d, s| {
+    var i: usize = 0;
+    if (has_avx2) {
+        while (i + 4 <= dst.len) : (i += 4) {
+            const s: @Vector(4, u64) = src[i..][0..4].*;
+            const d: @Vector(4, u64) = dst[i..][0..4].*;
+            dst[i..][0..4].* = d ^ s;
+        }
+    }
+    for (dst[i..], src[i..]) |*d, s| {
         d.* ^= s;
     }
 }
@@ -61,6 +75,27 @@ fn wordMask(start: u32, end: u32) u64 {
     return high & ~low;
 }
 
+/// Count bits set in both a AND b within [start_bit, end_bit).
+pub fn andCountOnesInRange(a: []const u64, b: []const u64, start_bit: u32, end_bit: u32) u32 {
+    if (start_bit >= end_bit) return 0;
+    const first_word = start_bit / 64;
+    const last_word = (end_bit - 1) / 64;
+    var count: u32 = 0;
+
+    if (first_word == last_word) {
+        const mask = wordMask(start_bit % 64, end_bit - first_word * 64);
+        return @popCount(a[first_word] & b[first_word] & mask);
+    }
+
+    count += @popCount(a[first_word] & b[first_word] & wordMask(start_bit % 64, 64));
+    for (a[first_word + 1 .. last_word], b[first_word + 1 .. last_word]) |wa, wb| {
+        count += @popCount(wa & wb);
+    }
+    count += @popCount(a[last_word] & b[last_word] & wordMask(0, end_bit - last_word * 64));
+
+    return count;
+}
+
 /// XOR src into dst, but only for bits from start_col onward.
 pub fn xorSliceFrom(dst: []u64, src: []const u64, start_col: u32) void {
     const first_word = start_col / 64;
@@ -72,7 +107,19 @@ pub fn xorSliceFrom(dst: []u64, src: []const u64, start_col: u32) void {
     } else {
         dst[first_word] ^= src[first_word];
     }
-    for (dst[first_word + 1 ..], src[first_word + 1 ..]) |*d, s| {
+
+    const rest_start = first_word + 1;
+    const rest_dst = dst[rest_start..];
+    const rest_src = src[rest_start..];
+    var i: usize = 0;
+    if (has_avx2) {
+        while (i + 4 <= rest_dst.len) : (i += 4) {
+            const s: @Vector(4, u64) = rest_src[i..][0..4].*;
+            const d: @Vector(4, u64) = rest_dst[i..][0..4].*;
+            rest_dst[i..][0..4].* = d ^ s;
+        }
+    }
+    for (rest_dst[i..], rest_src[i..]) |*d, s| {
         d.* ^= s;
     }
 }

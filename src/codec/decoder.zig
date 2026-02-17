@@ -2,7 +2,8 @@
 
 const std = @import("std");
 const base = @import("base.zig");
-const Symbol = @import("symbol.zig").Symbol;
+const symbol_mod = @import("symbol.zig");
+const SymbolBuffer = symbol_mod.SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
 const pi_solver = @import("../solver/pi_solver.zig");
@@ -13,7 +14,7 @@ pub const SourceBlockDecoder = struct {
     source_block_number: u8,
     num_source_symbols: u32,
     symbol_size: u16,
-    received_symbols: std.AutoHashMap(u32, Symbol),
+    received_symbols: std.AutoHashMap(u32, []u8),
     allocator: std.mem.Allocator,
 
     pub fn init(
@@ -26,14 +27,14 @@ pub const SourceBlockDecoder = struct {
             .source_block_number = source_block_number,
             .num_source_symbols = num_source_symbols,
             .symbol_size = symbol_size,
-            .received_symbols = std.AutoHashMap(u32, Symbol).init(allocator),
+            .received_symbols = std.AutoHashMap(u32, []u8).init(allocator),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *SourceBlockDecoder) void {
         var it = self.received_symbols.valueIterator();
-        while (it.next()) |sym| sym.deinit();
+        while (it.next()) |v| self.allocator.free(v.*);
         self.received_symbols.deinit();
     }
 
@@ -41,55 +42,43 @@ pub const SourceBlockDecoder = struct {
     pub fn addEncodingSymbol(self: *SourceBlockDecoder, packet: base.EncodingPacket) !void {
         const esi = packet.payload_id.encoding_symbol_id;
         if (self.received_symbols.contains(esi)) return;
-        const sym = try Symbol.fromSlice(self.allocator, packet.data);
-        errdefer sym.deinit();
-        try self.received_symbols.put(esi, sym);
+        const data = try self.allocator.alloc(u8, packet.data.len);
+        errdefer self.allocator.free(data);
+        @memcpy(data, packet.data);
+        try self.received_symbols.put(esi, data);
     }
 
     /// Returns true when enough symbols have been received to attempt decoding.
-    /// Padding symbols (K'-K zero symbols) are added automatically, so only
-    /// K received symbols are needed (not K').
     pub fn fullySpecified(self: SourceBlockDecoder) bool {
         return self.received_symbols.count() >= self.num_source_symbols;
     }
 
-    /// Decode the source block, returning K source symbols.
-    /// Caller owns the returned slice and each Symbol within it.
-    pub fn decode(self: *SourceBlockDecoder) ![]Symbol {
+    /// Decode the source block, returning K source symbols as a flat byte buffer.
+    /// Caller owns the returned slice (K * symbol_size bytes, truncate to actual data).
+    pub fn decode(self: *SourceBlockDecoder) ![]u8 {
         const k = self.num_source_symbols;
         const k_prime = systematic_constants.ceilKPrime(k);
         const si = systematic_constants.findSystematicIndex(k_prime).?;
         const s: usize = @intCast(si.s);
         const h: usize = @intCast(si.h);
-        const l: usize = @intCast(k_prime + si.s + si.h);
-        const sym_size: usize = self.symbol_size;
+        const l: u32 = k_prime + si.s + si.h;
+        const sym_size: u32 = self.symbol_size;
 
         const isis = try self.allocator.alloc(u32, k_prime);
         defer self.allocator.free(isis);
 
-        // D vector: S+H zero constraint rows, then K' symbol rows
-        const d = try self.allocator.alloc(Symbol, l);
-        var d_init: usize = 0;
-        errdefer {
-            for (d[0..d_init]) |sym| sym.deinit();
-            self.allocator.free(d);
-        }
+        // D vector as contiguous SymbolBuffer
+        var d = try SymbolBuffer.init(self.allocator, l, sym_size);
+        errdefer d.deinit();
 
-        // S+H zero constraint rows
-        for (0..s + h) |i| {
-            d[i] = try Symbol.init(self.allocator, sym_size);
-            d_init += 1;
-        }
-
-        // Collect received source symbols (ESI < K -> ISI = ESI)
+        // Collect received symbols
         var count: usize = 0;
         var it = self.received_symbols.iterator();
         while (it.next()) |entry| {
             if (count >= k_prime) break;
             const esi = entry.key_ptr.*;
             isis[count] = if (esi < k) esi else k_prime + (esi - k);
-            d[s + h + count] = try entry.value_ptr.clone();
-            d_init += 1;
+            d.copyFrom(@intCast(s + h + count), entry.value_ptr.*);
             count += 1;
         }
 
@@ -97,34 +86,27 @@ pub const SourceBlockDecoder = struct {
         var pad: u32 = k;
         while (pad < k_prime and count < k_prime) : (pad += 1) {
             isis[count] = pad;
-            d[s + h + count] = try Symbol.init(self.allocator, sym_size);
-            d_init += 1;
+            // Already zeroed by SymbolBuffer.init
             count += 1;
         }
 
-        var a = try constraint_matrix.buildDecodingMatrix(self.allocator, k_prime, isis[0..count]);
-        defer a.deinit();
+        var cm = try constraint_matrix.buildDecodingMatrices(self.allocator, k_prime, isis[0..count]);
+        defer cm.deinit();
 
-        const result = try pi_solver.solve(self.allocator, &a, d, k_prime);
-        self.allocator.free(result.ops.ops);
+        try pi_solver.solve(self.allocator, &cm, &d, k_prime);
 
         // Reconstruct source symbols 0..K-1 from intermediate symbols
-        const source = try self.allocator.alloc(Symbol, k);
-        var src_init: usize = 0;
-        errdefer {
-            for (source[0..src_init]) |sym| sym.deinit();
-            self.allocator.free(source);
-        }
+        const result = try self.allocator.alloc(u8, @as(usize, k) * @as(usize, sym_size));
+        errdefer self.allocator.free(result);
 
         for (0..k) |i| {
-            source[i] = try encoder.ltEncode(self.allocator, k_prime, d, @intCast(i));
-            src_init += 1;
+            const sym_data = try encoder.ltEncode(self.allocator, k_prime, &d, @intCast(i));
+            defer self.allocator.free(sym_data);
+            @memcpy(result[i * sym_size ..][0..sym_size], sym_data);
         }
 
-        for (d) |sym| sym.deinit();
-        self.allocator.free(d);
-
-        return source;
+        d.deinit();
+        return result;
     }
 };
 
@@ -160,9 +142,6 @@ pub const Decoder = struct {
         self.blocks.deinit();
     }
 
-    /// Add a received encoding packet. Routes to the appropriate SourceBlockDecoders
-    /// by SBN, lazily creating decoders as needed. For N > 1, splits the received
-    /// symbol into sub-symbols and routes each to the corresponding sub-block decoder.
     pub fn addPacket(self: *Decoder, packet: base.EncodingPacket) !void {
         const sbn = packet.payload_id.source_block_number;
         const n: usize = self.config.num_sub_blocks;
@@ -206,10 +185,6 @@ pub const Decoder = struct {
         }
     }
 
-    /// Attempt to decode the full transfer object.
-    /// Returns null if not all blocks have received enough symbols.
-    /// Returns the decoded data (truncated to transfer_length) on success.
-    /// Caller owns the returned slice.
     pub fn decode(self: *Decoder) !?[]u8 {
         const z: u32 = self.config.num_source_blocks;
         const n: usize = self.config.num_sub_blocks;
@@ -232,30 +207,29 @@ pub const Decoder = struct {
         var sbn: u8 = 0;
         while (sbn < z) : (sbn += 1) {
             const decoders = self.blocks.get(sbn).?;
+            const sym_size: usize = decoders[0].symbol_size;
 
             if (n == 1) {
-                const source_symbols = try decoders[0].decode();
-                defer {
-                    for (source_symbols) |sym| sym.deinit();
-                    self.allocator.free(source_symbols);
-                }
-                for (source_symbols) |sym| {
-                    const copy_len = @min(sym.data.len, transfer_length - offset);
+                const source_data = try decoders[0].decode();
+                defer self.allocator.free(source_data);
+                const k: usize = decoders[0].num_source_symbols;
+                for (0..k) |i| {
+                    const sym_start = i * sym_size;
+                    const copy_len = @min(sym_size, transfer_length - offset);
                     if (copy_len > 0) {
-                        @memcpy(result[offset .. offset + copy_len], sym.data[0..copy_len]);
+                        @memcpy(result[offset .. offset + copy_len], source_data[sym_start..][0..copy_len]);
                         offset += copy_len;
                     }
                 }
             } else {
                 const k: usize = decoders[0].num_source_symbols;
 
-                const sub_results = try self.allocator.alloc([]Symbol, n);
+                const sub_results = try self.allocator.alloc([]u8, n);
                 defer self.allocator.free(sub_results);
                 var decoded_count: usize = 0;
                 defer {
-                    for (sub_results[0..decoded_count]) |symbols| {
-                        for (symbols) |sym| sym.deinit();
-                        self.allocator.free(symbols);
+                    for (sub_results[0..decoded_count]) |data| {
+                        self.allocator.free(data);
                     }
                 }
 
@@ -264,13 +238,13 @@ pub const Decoder = struct {
                     decoded_count += 1;
                 }
 
-                // Interleave: reassemble full symbols from sub-block results
                 for (0..k) |sym_idx| {
                     for (0..n) |j| {
-                        const sub_size: usize = self.sub_block_partition.subSymbolSize(@intCast(j));
-                        const copy_len = @min(sub_size, transfer_length - offset);
+                        const sub_sym_size: usize = self.sub_block_partition.subSymbolSize(@intCast(j));
+                        const sub_start = sym_idx * sub_sym_size;
+                        const copy_len = @min(sub_sym_size, transfer_length - offset);
                         if (copy_len > 0) {
-                            @memcpy(result[offset .. offset + copy_len], sub_results[j][sym_idx].data[0..copy_len]);
+                            @memcpy(result[offset .. offset + copy_len], sub_results[j][sub_start..][0..copy_len]);
                             offset += copy_len;
                         }
                     }
@@ -287,11 +261,9 @@ test "encode-decode roundtrip with source symbols only" {
     const data = "Hello, RaptorQ! This is a roundtrip test.";
     const symbol_size: u16 = 8;
 
-    // Encode
     var enc = try encoder.Encoder.init(allocator, data, symbol_size, 1, 4);
     defer enc.deinit();
 
-    // Decode using only source symbols
     var dec = try Decoder.init(allocator, enc.config);
     defer dec.deinit();
 
@@ -319,7 +291,6 @@ test "encode-decode roundtrip with repair symbols" {
     var dec = try Decoder.init(allocator, enc.config);
     defer dec.deinit();
 
-    // Send all source symbols except the first two, plus repair symbols to compensate
     const k = enc.sourceBlockK(0);
     const k_prime = enc.sub_encoders[0].k_prime;
     var esi: u32 = 2;
@@ -329,7 +300,6 @@ test "encode-decode roundtrip with repair symbols" {
         try dec.addPacket(pkt);
     }
 
-    // Add repair symbols to reach K' total
     const needed = k_prime - (k - 2);
     esi = k;
     var sent: u32 = 0;
@@ -400,7 +370,6 @@ test "sub-block roundtrip N=2 with repair symbols" {
     const k = enc.sourceBlockK(0);
     const k_prime = enc.sub_encoders[0].k_prime;
 
-    // Skip first 2 source symbols
     var esi: u32 = 2;
     while (esi < k) : (esi += 1) {
         const pkt = try enc.encode(0, esi);
@@ -408,7 +377,6 @@ test "sub-block roundtrip N=2 with repair symbols" {
         try dec.addPacket(pkt);
     }
 
-    // Add repair symbols to reach K' total
     const needed = k_prime - (k - 2);
     esi = k;
     var sent: u32 = 0;
