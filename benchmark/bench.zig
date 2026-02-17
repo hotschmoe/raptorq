@@ -17,6 +17,11 @@ const BenchCase = struct {
     label: []const u8,
 };
 
+const PacketData = struct {
+    payload_id: raptorq.PayloadId,
+    data: []const u8,
+};
+
 const cases = [_]BenchCase{
     .{ .data_size = 256, .symbol_size = 64, .label = "256 B" },
     .{ .data_size = 1024, .symbol_size = 64, .label = "1 KB" },
@@ -37,44 +42,26 @@ fn median(samples: []u64) u64 {
     return samples[samples.len / 2];
 }
 
+fn runEncode(allocator: std.mem.Allocator, data: []const u8, symbol_size: u16) !void {
+    var enc = try Encoder.init(allocator, data, symbol_size, 1, 4);
+    defer enc.deinit();
+    const k_prime = enc.sub_encoders[0].k_prime;
+    var esi: u32 = 0;
+    while (esi < k_prime) : (esi += 1) {
+        const pkt = try enc.encode(0, esi);
+        allocator.free(pkt.data);
+    }
+}
+
 fn benchEncode(allocator: std.mem.Allocator, data: []const u8, symbol_size: u16, warmup: usize, iters: usize) !u64 {
     var buf: [64]u64 = undefined;
     const samples = buf[0..iters];
 
-    // Warmup
-    for (0..warmup) |_| {
-        var enc = try Encoder.init(allocator, data, symbol_size, 1, 4);
-        const k = enc.sourceBlockK(0);
-        const k_prime = enc.sub_encoders[0].k_prime;
-        var esi: u32 = 0;
-        while (esi < k) : (esi += 1) {
-            const pkt = try enc.encode(0, esi);
-            allocator.free(pkt.data);
-        }
-        // Generate padding repair symbols (K to K'-1)
-        while (esi < k_prime) : (esi += 1) {
-            const pkt = try enc.encode(0, esi);
-            allocator.free(pkt.data);
-        }
-        enc.deinit();
-    }
+    for (0..warmup) |_| try runEncode(allocator, data, symbol_size);
 
-    // Measured iterations
     for (0..iters) |i| {
         const start = std.time.Instant.now() catch unreachable;
-        var enc = try Encoder.init(allocator, data, symbol_size, 1, 4);
-        const k = enc.sourceBlockK(0);
-        const k_prime = enc.sub_encoders[0].k_prime;
-        var esi: u32 = 0;
-        while (esi < k) : (esi += 1) {
-            const pkt = try enc.encode(0, esi);
-            allocator.free(pkt.data);
-        }
-        while (esi < k_prime) : (esi += 1) {
-            const pkt = try enc.encode(0, esi);
-            allocator.free(pkt.data);
-        }
-        enc.deinit();
+        try runEncode(allocator, data, symbol_size);
         const end = std.time.Instant.now() catch unreachable;
         samples[i] = end.since(start);
     }
@@ -94,12 +81,9 @@ fn benchDecode(allocator: std.mem.Allocator, data: []const u8, symbol_size: u16,
     const k = enc.sourceBlockK(0);
     const k_prime = enc.sub_encoders[0].k_prime;
     const drop_count = @max(k / 10, 1);
-    const received_source = k - drop_count;
-    const repair_needed = k_prime - received_source;
-    const total_packets = received_source + repair_needed;
+    const repair_needed = k_prime - (k - drop_count);
 
-    const PacketData = struct { payload_id: raptorq.PayloadId, data: []const u8 };
-    const packets = try allocator.alloc(PacketData, total_packets);
+    const packets = try allocator.alloc(PacketData, k_prime);
     defer {
         for (packets) |p| allocator.free(p.data);
         allocator.free(packets);
@@ -115,41 +99,34 @@ fn benchDecode(allocator: std.mem.Allocator, data: []const u8, symbol_size: u16,
     }
     // Repair symbols
     esi = k;
-    var sent: u32 = 0;
-    while (sent < repair_needed) : (sent += 1) {
-        const pkt = try enc.encode(0, esi + sent);
+    while (esi < k + repair_needed) : (esi += 1) {
+        const pkt = try enc.encode(0, esi);
         packets[pkt_idx] = .{ .payload_id = pkt.payload_id, .data = pkt.data };
         pkt_idx += 1;
     }
 
     const oti = enc.objectTransmissionInformation();
 
-    // Warmup
-    for (0..warmup) |_| {
-        var dec = try Decoder.init(allocator, oti);
-        for (packets) |p| {
-            try dec.addPacket(.{ .payload_id = p.payload_id, .data = p.data });
-        }
-        const decoded = (try dec.decode()).?;
-        allocator.free(decoded);
-        dec.deinit();
-    }
+    for (0..warmup) |_| try runDecode(allocator, oti, packets);
 
-    // Measured iterations
     for (0..iters) |i| {
         const start = std.time.Instant.now() catch unreachable;
-        var dec = try Decoder.init(allocator, oti);
-        for (packets) |p| {
-            try dec.addPacket(.{ .payload_id = p.payload_id, .data = p.data });
-        }
-        const decoded = (try dec.decode()).?;
-        allocator.free(decoded);
-        dec.deinit();
+        try runDecode(allocator, oti, packets);
         const end = std.time.Instant.now() catch unreachable;
         samples[i] = end.since(start);
     }
 
     return median(samples);
+}
+
+fn runDecode(allocator: std.mem.Allocator, oti: raptorq.ObjectTransmissionInformation, packets: []const PacketData) !void {
+    var dec = try Decoder.init(allocator, oti);
+    defer dec.deinit();
+    for (packets) |p| {
+        try dec.addPacket(.{ .payload_id = p.payload_id, .data = p.data });
+    }
+    const decoded = (try dec.decode()).?;
+    allocator.free(decoded);
 }
 
 fn mbps(data_size: usize, median_ns: u64) f64 {

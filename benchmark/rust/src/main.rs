@@ -7,7 +7,7 @@
 // attempts decoding on every call. The Zig API separates addPacket from decode().
 // Both benchmarks use the natural API for their implementation.
 
-use raptorq::{Encoder, EncodingPacket, ObjectTransmissionInformation};
+use raptorq::{Encoder, EncodingPacket};
 use std::time::Instant;
 
 struct BenchCase {
@@ -43,13 +43,10 @@ fn median(samples: &mut [u128]) -> u128 {
 }
 
 fn bench_encode(data: &[u8], symbol_size: u16, warmup: usize, iters: usize) -> u128 {
-    // Warmup
     for _ in 0..warmup {
         let enc = Encoder::with_defaults(data, symbol_size);
-        let blocks = enc.get_block_encoders();
-        for block in &blocks {
+        for block in enc.get_block_encoders() {
             let _src = block.source_packets();
-            // Repair packets up to K' - K to match Zig
         }
     }
 
@@ -57,13 +54,9 @@ fn bench_encode(data: &[u8], symbol_size: u16, warmup: usize, iters: usize) -> u
     for sample in samples.iter_mut() {
         let start = Instant::now();
         let enc = Encoder::with_defaults(data, symbol_size);
-        let blocks = enc.get_block_encoders();
-        for block in &blocks {
-            let src = block.source_packets();
-            let k = src.len() as u32;
-            // The Rust crate does not expose K' directly, but source_packets()
-            // already triggers the full encode pipeline (constraint matrix + PI solver).
-            // Generate a small set of repair packets to be comparable.
+        for block in enc.get_block_encoders() {
+            // source_packets() triggers the full encode pipeline (constraint matrix + PI solver).
+            let k = block.source_packets().len() as u32;
             let _rep = block.repair_packets(0, (k / 10).max(1));
         }
         *sample = start.elapsed().as_nanos();

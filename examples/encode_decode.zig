@@ -36,14 +36,8 @@ pub fn main() !void {
         var dec = try Decoder.init(allocator, enc.objectTransmissionInformation());
         defer dec.deinit();
 
-        // Send all K source symbols
+        // Send all K source symbols + K'-K padding symbols to reach decode threshold
         var esi: u32 = 0;
-        while (esi < k) : (esi += 1) {
-            const pkt = try enc.encode(0, esi);
-            defer allocator.free(pkt.data);
-            try dec.addPacket(pkt);
-        }
-        // Send K'-K padding repair symbols to reach threshold
         while (esi < k_prime) : (esi += 1) {
             const pkt = try enc.encode(0, esi);
             defer allocator.free(pkt.data);
@@ -77,12 +71,10 @@ pub fn main() !void {
         }
 
         // Add repair symbols to reach K' total received
-        const received_source = k - drop_count;
-        const repair_needed = k_prime - received_source;
+        const repair_needed = k_prime - (k - drop_count);
         esi = k;
-        var sent: u32 = 0;
-        while (sent < repair_needed) : (sent += 1) {
-            const pkt = try enc.encode(0, esi + sent);
+        while (esi < k + repair_needed) : (esi += 1) {
+            const pkt = try enc.encode(0, esi);
             defer allocator.free(pkt.data);
             try dec.addPacket(pkt);
         }
