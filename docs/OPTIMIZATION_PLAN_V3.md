@@ -3,6 +3,7 @@
 Date: 2026-02-18
 Baseline: commit b17f98b (dev-hotschmoe), all V2 items complete
 Target: Match cberner/raptorq v2.0 throughput (speed parity)
+Status: **ALL ITEMS IMPLEMENTED** (2026-02-17)
 
 ## Correction: V2 Plan Was Wrong About Rust's Approach
 
@@ -42,7 +43,7 @@ Total:                  74.2ms        Rust total: ~32ms
 Source: direct analysis of cberner/raptorq Rust source (src/sparse_matrix.rs,
 src/pi_solver.rs, src/encoder.rs, src/arraymap.rs, src/sparse_vec.rs).
 
-### Gap 1: SparseBinaryMatrix with Progressive Densification
+### Gap 1: SparseBinaryMatrix with Progressive Densification [IMPLEMENTED]
 
 Rust uses a hybrid sparse/dense matrix for K' >= 250 (SPARSE_MATRIX_THRESHOLD):
 
@@ -65,7 +66,7 @@ migrates them from sorted-u16 sparse to bit-packed dense representation.
 Zig: pure `DenseBinaryMatrix` for all sizes. Every operation scans ceil(L/64)
 words even when rows have 3 nonzeros (LDPC) or ~20 nonzeros (LT).
 
-### Gap 2: O(1) Column Swaps via Column Indirection
+### Gap 2: O(1) Column Swaps via Column Indirection [IMPLEMENTED]
 
 Rust: `logical_col_to_physical`/`physical_col_to_logical` arrays (u16).
 Column swaps are two u16 swaps -- O(1). No data movement.
@@ -76,7 +77,7 @@ Phase 1 performs O(L) column swaps => O(L^2) total.
 
 At K'=2565 (10 MB): each swap touches 2673 rows. ~2600 swaps total.
 
-### Gap 3: Columnar Index (ImmutableListMap)
+### Gap 3: Columnar Index (ImmutableListMap) [IMPLEMENTED]
 
 Rust builds a CSC-like index before Phase 1:
 
@@ -98,7 +99,7 @@ Built once after constraint matrix construction, freed after Phase 1.
 Zig: no columnar index. Both `eliminateColumn` and `inactivateColumn` scan
 all rows [i, hdpc_start) checking each bit individually.
 
-### Gap 4: Partial Row Operations (Errata 11)
+### Gap 4: Partial Row Operations (Errata 11) [IMPLEMENTED]
 
 During Phase 1 elimination, Rust only XORs the U (dense) section:
 
@@ -119,7 +120,7 @@ Rust records Phase 1 row ops as `Vec<RowOp>` and replays them:
 Zig: `binaryXorRowRange(src, dst, col)` XORs from column i through the end,
 scanning the entire V+U region even though V bits in the pivot row are zero.
 
-### Gap 5: Degree Histogram + r=1 Fast Path
+### Gap 5: Degree Histogram + r=1 Fast Path [IMPLEMENTED]
 
 Rust maintains:
 - `ones_histogram[degree]`: count of rows with each degree value
@@ -131,7 +132,7 @@ degree-1 rows are very common during Phase 1).
 Zig: `selectPivotRow` linearly scans all v_degree[i..hdpc_start] to find the
 minimum. O(L-H-i) per iteration, ~2600 comparisons per iteration at K'=2565.
 
-### Gap 6: Encoding Plan Caching
+### Gap 6: Encoding Plan Caching [IMPLEMENTED]
 
 Rust pre-computes the operation vector with 1-byte dummy symbols:
 
@@ -148,7 +149,7 @@ are replayed on real data (just XOR/FMA on symbol buffers, no matrix work).
 
 Zig: runs the full solver with actual full-size symbols every time.
 
-### Gap 7: In-Place Reorder
+### Gap 7: In-Place Reorder [IMPLEMENTED]
 
 Rust: symbols are `Vec<Symbol>` where each Symbol wraps a `Vec<u8>`. Reorder
 ops are O(1) pointer swaps per symbol.
@@ -160,10 +161,9 @@ to reorder, then copies back. At 10 MB: 2 x 10.9 MB memcpy.
 
 ## Implementation Plan
 
-### Item 1: SparseBinaryMatrix + Column Indirection + Columnar Index
+### Item 1: SparseBinaryMatrix + Column Indirection + Columnar Index [DONE]
 **Gaps addressed: 1, 2, 3**
 **Expected impact: Phase 1 time reduced 3-5x for K' >= 250**
-**Risk: HIGH (large architectural change)**
 
 New `src/matrix/sparse_binary_matrix.zig` implementing a hybrid representation:
 
@@ -208,11 +208,10 @@ Implementation steps:
 The columnar index is built once via `enableColumnAcceleration()` before
 Phase 1 and freed via `disableColumnAcceleration()` after Phase 1.
 
-### Item 2: Partial Row Operations (Errata 11)
+### Item 2: Partial Row Operations (Errata 11) [DONE]
 **Gap addressed: 4**
 **Expected impact: Phase 1 XOR bandwidth reduced ~50%**
-**Risk: MEDIUM (requires RowOp recording + replay)**
-**Dependency: benefits most when combined with Item 1 (sparse section skipped)**
+**Dependency: compounds with Item 1 (sparse section skipped entirely)**
 
 During Phase 1 elimination, only XOR the U section (dense columns). The V
 section of the pivot row has only one nonzero (column i, being zeroed), so
@@ -230,10 +229,9 @@ With Item 1's sparse matrix: `add_assign_rows(start_col=boundary)` naturally
 skips the sparse section and only XORs dense words. Without Item 1: implement
 a two-range XOR (bit i + U section).
 
-### Item 3: Degree Histogram + r=1 Fast Path
+### Item 3: Degree Histogram + r=1 Fast Path [DONE]
 **Gap addressed: 5**
 **Expected impact: selectPivotRow reduced from O(L) to O(1) typical**
-**Risk: LOW (self-contained, incremental change)**
 
 Add to SolverState:
 ```
@@ -256,10 +254,9 @@ if min_r == 1:
     scan rows_with_one for best original_degree
 ```
 
-### Item 4: Encoding Plan Caching
+### Item 4: Encoding Plan Caching [DONE]
 **Gap addressed: 6**
-**Expected impact: encoding throughput boost (solver runs with 1-byte symbols)**
-**Risk: LOW (additive feature, no existing code changes)**
+**Expected impact: encoding throughput boost (solver runs once, plan replayed)**
 
 New `EncodingPlan` struct:
 ```
@@ -283,10 +280,9 @@ fn apply(plan, buf: *SymbolBuffer) void {
 SourceBlockEncoder gains an optional plan parameter. Encoder caches plans
 by K value across source blocks.
 
-### Item 5: In-Place Reorder via Cycle Decomposition
+### Item 5: In-Place Reorder via Cycle Decomposition [DONE]
 **Gap addressed: 7**
 **Expected impact: saves ~2ms at 10 MB (2x memcpy eliminated)**
-**Risk: LOW**
 
 Replace the double-buffer copy in `applyAndRemap` with a cycle-walk permutation:
 

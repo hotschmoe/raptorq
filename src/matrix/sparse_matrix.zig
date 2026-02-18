@@ -156,7 +156,7 @@ pub const SparseBinaryMatrix = struct {
         std.mem.swap(u32, &self.log_row_to_phys[i], &self.log_row_to_phys[j]);
     }
 
-    /// O(1) column swap via indirection. start_row parameter ignored (for API compat).
+    /// O(1) column swap via indirection. start_row unused (DenseBinaryMatrix needs it).
     pub fn swapCols(self: *SparseBinaryMatrix, i: u32, j: u32, _start_row: u32) void {
         _ = _start_row;
         if (i == j) return;

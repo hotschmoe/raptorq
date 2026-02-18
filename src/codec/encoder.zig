@@ -199,12 +199,8 @@ pub const Encoder = struct {
             const end = @min(data_offset + block_len, data.len);
             const block_data = data[data_offset..end];
 
-            const plan_ptr: *const pi_solver.SolverPlan = if (sbn_idx < part.count_large)
-                &plans[0]
-            else if (plan_count == 2)
-                &plans[1]
-            else
-                &plans[0];
+            const plan_idx: usize = if (sbn_idx < part.count_large) 0 else plan_count - 1;
+            const plan_ptr = &plans[plan_idx];
 
             if (n == 1) {
                 sub_encs[sbn_idx] = try SourceBlockEncoder.init(

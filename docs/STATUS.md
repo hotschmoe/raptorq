@@ -30,6 +30,12 @@ with end-to-end roundtrip verification including repair symbol generation and re
 
 ### Recent Changes
 
+- **V3 optimization (all 9 steps)** - Comptime-generic solver over DenseBinaryMatrix /
+  SparseBinaryMatrix. SparseBinaryMatrix: hybrid sparse V / dense U with progressive
+  densification, O(1) row+column indirection, columnar index (CSC) for O(nnz) Phase 1.
+  Degree histogram for O(1) pivot selection. Errata 11: Phase 1 XOR skips V section.
+  Encoding plan caching via SolverPlan (pre-solve + replay). In-place cycle decomposition
+  for symbol permutation. See docs/OPTIMIZATION_PLAN_V3.md.
 - **SIMD vectorization** - Split-nibble GF(256) multiplication in `math/octets.zig` using
   TBL (aarch64 NEON), PSHUFB (x86_64 SSSE3), and scalar fallback. Vectorized `addAssign`,
   `fmaSlice`, and `mulAssignScalar`. Fixed O(n^2) BFS queue in `solver/graph.zig`.
@@ -59,12 +65,15 @@ Leverage Zig's strengths for high-throughput FEC.
   columns [i, L) instead of full row via xorRowRange. (2026-02-17)
 - [x] **P3: Persistent graph** - ConnectedComponentGraph with union-find allocated once
   per solve and reset between iterations. O(alpha(n)) amortized edge operations. (2026-02-17)
-- [ ] **P4: Logical row indirection** - Track row permutations via index arrays instead
-  of physically swapping row data. swapRows becomes O(1) instead of O(L).
+- [x] **P4: Logical row indirection** - Row+column permutation via index arrays. DenseBinaryMatrix
+  uses SolverState-managed log_to_phys/phys_to_log. SparseBinaryMatrix manages its own
+  internally. swapRows/swapCols O(1). (2026-02-17)
+- [x] **V3: SparseBinaryMatrix** - Hybrid sparse V / dense U with progressive densification,
+  columnar index (CSC), degree histogram, Errata 11 U-only XOR, encoding plan caching,
+  in-place cycle decomposition. Comptime-generic SolverState and ConstraintMatrices over
+  matrix type. See docs/OPTIMIZATION_PLAN_V3.md for details. (2026-02-17)
 - [ ] **Memory layout optimization** - Cache-friendly data layout for symbol storage and
   matrix rows. Profile and minimize allocator pressure in hot paths.
-- [ ] **Comptime specialization** - Explore comptime-specialized paths for common K' values
-  or symbol sizes where the compiler can unroll/optimize aggressively.
 
 ### Interop Testing
 

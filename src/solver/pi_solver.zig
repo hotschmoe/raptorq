@@ -20,7 +20,6 @@ const OperationVector = @import("../codec/operation_vector.zig").OperationVector
 const SymbolOp = @import("../codec/operation_vector.zig").SymbolOp;
 const ConnectedComponentGraph = @import("graph.zig").ConnectedComponentGraph;
 const systematic_constants = @import("../tables/systematic_constants.zig");
-const gf2 = @import("../math/gf2.zig");
 
 pub const SolverError = error{ SingularMatrix, OutOfMemory };
 
@@ -404,7 +403,7 @@ fn SolverState(comptime MatrixType: type) type {
                     if (!self.binaryGet(row, col)) continue;
 
                     self.binaryClearBit(row, col);
-                    self.binary.xorRowRange(self.log_to_phys[col], self.log_to_phys[row], boundary);
+                    try self.binaryXorRowRange(col, row, boundary);
 
                     const old_deg = self.v_degree[row];
                     self.updateDegree(row, old_deg, old_deg - 1);
@@ -418,6 +417,13 @@ fn SolverState(comptime MatrixType: type) type {
 
             // HDPC: XOR column col (only V nonzero) + U section of pivot row
             const h = self.l - hdpc_start;
+
+            // Pivot row data is invariant across HDPC rows -- resolve once
+            const pivot_phys = if (comptime is_sparse)
+                self.binary.log_row_to_phys[col]
+            else
+                self.log_to_phys[col];
+
             var hdpc_r: u32 = 0;
             while (hdpc_r < h) : (hdpc_r += 1) {
                 const logical_row = hdpc_start + hdpc_r;
@@ -428,8 +434,6 @@ fn SolverState(comptime MatrixType: type) type {
                 hdpc_row_bytes[col] ^= factor.value;
 
                 if (comptime is_sparse) {
-                    // Dense section = U section (all inactivated columns)
-                    const pivot_phys = self.binary.log_row_to_phys[col];
                     const wpr = self.binary.denseWordsUsed();
                     const dense_words = self.binary.denseRowConst(pivot_phys);
                     for (0..wpr) |wi| {
@@ -444,8 +448,6 @@ fn SolverState(comptime MatrixType: type) type {
                         }
                     }
                 } else {
-                    // Iterate only U-section words (skip V)
-                    const pivot_phys = self.log_to_phys[col];
                     const pivot_row_data = self.binary.rowSliceConst(pivot_phys);
                     const start_word = boundary / 64;
                     for (start_word..pivot_row_data.len) |wi| {
