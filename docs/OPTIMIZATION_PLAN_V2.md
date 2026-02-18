@@ -6,259 +6,173 @@ Target: Match or beat cberner/raptorq v2.0 throughput
 
 ## Implementation Status
 
-| Item | Description                          | Status    |
-|------|--------------------------------------|-----------|
-| 1    | Contiguous SymbolBuffer              | DONE      |
-| 2    | Incremental v_degree tracking        | DONE      |
-| 3    | Logical row indirection              | DONE      |
-| 4    | Direct binary matrix construction    | DONE      |
-| 5    | Widen SIMD to 256-bit (AVX2)        | Remaining |
+| Item | Description                          | Status |
+|------|--------------------------------------|--------|
+| 1    | Contiguous SymbolBuffer              | DONE   |
+| 2    | Incremental v_degree tracking        | DONE   |
+| 3    | Logical row indirection              | DONE   |
+| 4    | Direct binary matrix construction    | DONE   |
+| 5    | Widen SIMD / optimize vector paths   | DONE   |
 
-Items 1-4 implemented in commits 047f3f8 and prior. Reduced gap from ~5-6x to ~2.5-4x (encode) and ~3-5x (decode).
-
-Remaining work: Item 5 (SIMD widening) plus columnar index for Phase 1 elimination.
+All items complete. Items 1-4 reduced gap from ~5-6x to ~2.5-4x.
+Item 5 added AVX2 256-bit paths + 2x16 unrolled SSSE3 fallbacks + explicit
+128-bit GF(2) vectors + SIMD symbol swap.
 
 ## Current Benchmark Results
 
 Both benchmarks: identical parameters, same data sizes, symbol sizes, 10% loss,
 median of 11 iterations (5 for >=1MB), ReleaseFast / --release.
+Machine: QEMU x86_64 with SSSE3 (no AVX2).
 
 ```
 Size     | T    | Zig Enc | Rust Enc | Gap   | Zig Dec | Rust Dec | Gap
 ---------|------|---------|----------|-------|---------|----------|-----
-256 B    | 64   |     1.7 |      9.0 |  5.3x |     1.6 |     11.1 |  6.9x
-1 KB     | 64   |     4.3 |     21.6 |  5.0x |     3.9 |     25.7 |  6.6x
-10 KB    | 64   |     6.1 |     21.0 |  3.4x |     5.8 |     24.5 |  4.2x
-16 KB    | 64   |     5.7 |     24.0 |  4.2x |     5.3 |     27.8 |  5.2x
-64 KB    | 64   |     3.3 |     22.1 |  6.7x |     3.1 |     25.4 |  8.2x
-128 KB   | 256  |    15.7 |     85.5 |  5.4x |    15.3 |     96.7 |  6.3x
-256 KB   | 256  |    11.9 |     80.8 |  6.8x |    11.4 |     89.5 |  7.9x
-512 KB   | 1024 |    59.4 |    242.0 |  4.1x |    53.0 |    262.5 |  5.0x
-1 MB     | 1024 |    41.8 |    233.6 |  5.6x |    37.3 |    251.6 |  6.7x
-2 MB     | 2048 |    69.7 |    339.4 |  4.9x |    66.6 |    290.5 |  4.4x
-4 MB     | 2048 |    45.8 |    298.5 |  6.5x |    43.8 |    248.3 |  5.7x
-10 MB    | 4096 |    66.8 |    320.0 |  4.8x |    64.4 |    308.3 |  4.8x
+256 B    | 64   |     2.9 |      9.2 |  3.2x |     2.3 |     11.3 |  4.9x
+1 KB     | 64   |     8.0 |     22.1 |  2.8x |     5.7 |     25.6 |  4.5x
+10 KB    | 64   |    12.0 |     21.4 |  1.8x |     7.5 |     25.5 |  3.4x
+16 KB    | 64   |    11.1 |     24.0 |  2.2x |     7.4 |     26.9 |  3.6x
+64 KB    | 64   |     6.9 |     22.2 |  3.2x |     4.7 |     25.4 |  5.4x
+128 KB   | 256  |    33.7 |     85.3 |  2.5x |    23.6 |     96.8 |  4.1x
+256 KB   | 256  |    23.6 |     81.4 |  3.4x |    18.4 |     91.4 |  5.0x
+512 KB   | 1024 |    95.5 |    244.6 |  2.6x |    71.3 |    264.0 |  3.7x
+1 MB     | 1024 |    76.9 |    236.3 |  3.1x |    56.4 |    252.3 |  4.5x
+2 MB     | 2048 |   127.1 |    341.1 |  2.7x |    93.6 |    281.3 |  3.0x
+4 MB     | 2048 |    91.7 |    277.8 |  3.0x |    72.5 |    249.8 |  3.4x
+10 MB    | 4096 |   113.3 |    312.1 |  2.8x |    89.6 |    300.2 |  3.4x
                                                           (MB/s -- higher is better)
 ```
 
-Gap: 3.4x - 8.2x. Average ~5-6x behind Rust.
+Encode gap: 1.8x - 3.4x (avg ~2.7x). Decode gap: 3.0x - 5.4x (avg ~4.0x).
 
 
 ## Profiler Breakdown (10 MB encode, single pass)
 
 ```
-Component              Time (ms)   % of Total   Root Cause
+Component              Time (ms)   % of Total
 ---------------------------------------------------------------
-Phase 1 (elimination)    63.6       45%          Brute-force row scanning
-Apply (symbol ops)       44.6       32%          Scattered symbol allocations
-Matrix build             16.9       12%          Full OctetMatrix intermediate
-Symbol generation         8.2        6%          Per-symbol heap alloc
-Phase 2                   5.0        4%          (acceptable)
-Phase 3                   2.3        2%          (acceptable)
+Phase 1 (elimination)    20.3       27%
+Apply (symbol ops)       44.5       60%
+Phase 2                   5.3        7%
+Phase 3                   4.1        6%
 ---------------------------------------------------------------
-Total                   140.6      100%          Rust total: ~31ms
+Solver total             74.2      100%         Rust total: ~32ms
+
+Encoder.init total       82.0                   (includes matrix build)
+Symbol generation         8.2
+Encoder total            90.2
 ```
 
 Full profiler output across sizes:
 
 ```
-Case           K'     L     Phase1      Phase2    Phase3    Apply    Total    P1%
-1 KB           18     39    26us        30us      0us       21us     78us     33%
-10 KB          160    193   207us       130us     10us      73us     421us    49%
-64 KB          1032   1101  6,840us     1,361us   369us     673us    9,246us  74%
-128 KB         526    577   1,417us     478us     97us      572us    2,564us  55%
-256 KB         1032   1101  7,101us     1,374us   372us     1,382us  10,231us 69%
-512 KB         526    577   1,415us     483us     97us      1,599us  3,595us  39%
-1 MB           1032   1101  6,176us     1,359us   366us     3,853us  11,756us 53%
-4 MB           2070   2170  37,194us    3,338us   1,477us   19,339us 61,350us 61%
-10 MB          2565   2673  63,576us    4,986us   2,332us   44,612us 115,507us 55%
+Case           K'     L     Phase1      Phase2    Phase3    Apply    Total    P1%    Apply%
+1 KB           18     39    25us        30us      0us       16us     72us     35%    22%
+10 KB          160    193   212us       180us     19us      95us     507us    42%    19%
+64 KB          1032   1101  3,633us     1,488us   516us     569us    6,207us  59%     9%
+128 KB         526    577   1,152us     516us     134us     494us    2,298us  50%    21%
+256 KB         1032   1101  3,705us     1,512us   510us     1,172us  6,900us  54%    17%
+512 KB         526    577   1,146us     500us     129us     1,472us  3,249us  35%    45%
+1 MB           1032   1101  3,563us     1,462us   512us     3,328us  8,866us  40%    38%
+4 MB           2070   2170  13,438us    3,527us   2,566us   14,990us 34,522us 39%    43%
+10 MB          2565   2673  20,257us    5,279us   4,136us   44,537us 74,210us 27%    60%
 ```
 
 
-## Root Cause Analysis
-
-### Problem 1: Apply phase -- scattered symbol allocations (44.6ms at 10 MB)
-
-Every Symbol is an independent heap allocation:
+## Progression Summary
 
 ```
-d[i] = try Symbol.init(allocator, sym_size);  // malloc per symbol
+Version     | 10 MB Enc | 10 MB Dec | Enc Gap | Dec Gap
+------------|-----------|-----------|---------|--------
+Baseline    |    ~20    |    ~20    |  ~16x   |  ~15x
+Items 1-4   |     67    |     64    |   4.8x  |   4.8x
+Item 5      |    113    |     90    |   2.8x  |   3.4x
+Rust ref    |    312    |    300    |    --   |    --
 ```
 
-For L=2673, T=4096: 2673 separate 4KB allocations scattered across the heap.
-The apply phase executes ~20,000 XOR/FMA operations bouncing between random
-memory addresses. Cache misses dominate.
+## Remaining Gap Analysis
 
-Rust allocates one contiguous buffer of L*T bytes. Sequential access pattern.
-
-Impact estimate:
-  - Apply touches ~20,000 * 4096 * 2 = ~160 MB of data
-  - At 44.6ms, effective bandwidth = ~3.6 GB/s (DDR4 peak: ~25 GB/s)
-  - With contiguous buffer: expect 10-15 GB/s = 3-4x speedup on apply phase
-
-### Problem 2: Phase 1 -- brute-force row scanning (63.6ms at 10 MB)
-
-Every Phase 1 iteration does:
-
-```
-selectPivotRow:    scan ALL remaining rows, popcount each     O(R * W)
-graphSubstep:      re-scan ALL remaining rows for r==2        O(R * W) [again]
-                   scan AGAIN to find row touching target_col O(R * W) [third time]
-eliminateColumn:   scan remaining rows for bit in pivot col   O(R)
-```
-
-Where R = remaining rows (~2600), W = words_per_row (42 u64s).
-Three full matrix scans per r=2 iteration. Over ~2569 iterations with r=2
-being the common LDPC case, that's ~7,700 full scans.
-
-Rust avoids this with:
-  - Incremental degree tracking: degree[row] updated on XOR, O(1) per affected row
-  - Columnar index: cols_to_rows[col] -> set of rows with a 1 in that column
-    eliminateColumn iterates only affected rows
-    graphSubstep reads edges directly from columnar index
-
-This transforms Phase 1 from O(L^2 * W) to O(L * avg_nonzeros).
-
-### Problem 3: Physical row swaps in DenseBinaryMatrix
-
-swapRows copies words_per_row u64s (42 words for L=2673). Called on every
-Phase 1 iteration plus Phase 2 pivoting.
-
-Rust uses logical row indirection: swap(index[r1], index[r2]) = two u32 swaps.
-
-### Problem 4: Redundant OctetMatrix during constraint matrix build
-
-buildConstraintMatrix creates a full L*L OctetMatrix (1 byte/entry = 7.1 MB at L=2673).
-SolverState.init then extracts binary rows into DenseBinaryMatrix element-by-element:
-
-```zig
-while (row < hdpc_start) : (row += 1) {
-    while (col < l) : (col += 1) {
-        if (!a.get(row, col).isZero()) {
-            binary.set(row, col, true);
-        }
-    }
-}
-```
-
-This means: allocate 7.1 MB, fill it, allocate 0.9 MB (bit-packed), copy element
-by element, then free the 7.1 MB. For L=2673, the copy loop touches 2650 * 2673
-= 7 million elements.
-
-Fix: build DenseBinaryMatrix directly in constraint_matrix.zig. Only the H
-HDPC rows (~20 rows) need the OctetMatrix representation.
-
-### Problem 5: 128-bit SIMD for symbol XOR/FMA
-
-octets.zig processes 16 bytes at a time:
-
-```zig
-while (i + 16 <= dst.len) : (i += 16) {
-    const s: @Vector(16, u8) = src[i..][0..16].*;
-    const d: @Vector(16, u8) = dst[i..][0..16].*;
-    dst[i..][0..16].* = d ^ s;
-}
-```
-
-On x86_64 with AVX2, 32-byte (256-bit) vectors are available. For pure XOR
-(addAssign), we should use @Vector(32, u8). For FMA with VPSHUFB (AVX2),
-the split-nibble technique works at 256-bit width.
-
-This doubles SIMD throughput for all symbol operations.
+With all 5 items complete, the gap is ~2.8x encode / ~3.4x decode. Both Zig and
+Rust run with SSSE3 (128-bit SIMD) on this machine -- the gap is NOT about SIMD
+width. The remaining difference is algorithmic/structural.
 
 
-## Implementation Items
+## Next Investigation: Apply Phase Memory Access Pattern
 
-### Item 1: Contiguous symbol buffer [DONE]
+The apply phase is now the dominant bottleneck: 60% of solver time at 10 MB
+(44.5ms out of 74.2ms). It runs ~20,000 XOR/FMA operations on 4096-byte symbols
+stored in a 10.9 MB contiguous SymbolBuffer.
 
-Replace per-symbol allocations with a single contiguous buffer.
+### The problem
 
-New type: SymbolBuffer in codec/symbol.zig (or new file if needed).
+Each operation touches a (src, dst) pair of symbol rows. The OperationVector
+records operations in solver execution order, which means row access is
+essentially random across the buffer. For L=2673, T=4096:
 
 ```
-SymbolBuffer {
-    data: []align(64) u8,   // L * T bytes, cache-line aligned
-    symbol_size: usize,
-    count: usize,
-}
+SymbolBuffer: 2673 * 4096 = 10.9 MB (fits L3, not L2)
+Each op: read src row (4 KB) + read/write dst row (4 KB) = 8 KB touched
+~20,000 ops * 8 KB = ~160 MB total memory traffic
+Effective bandwidth: 160 MB / 44.5ms = ~3.6 GB/s
+DDR4 theoretical: ~25 GB/s
+L3 sequential read: ~15 GB/s
 ```
 
-Row access: `buf.data[row * T .. (row+1) * T]`
+We're at ~24% of L3 bandwidth. The gap is cache miss latency from the random
+access pattern -- each op likely evicts cache lines that a later op will need.
 
-Changes needed:
-  - Add SymbolBuffer type with init/deinit/get/addAssign/fma/mulAssign/swap
-  - pi_solver.solve takes SymbolBuffer instead of []Symbol
-  - OperationVector.apply takes SymbolBuffer instead of []Symbol
-  - encoder.zig SourceBlockEncoder uses SymbolBuffer for D vector
-  - decoder.zig SourceBlockDecoder uses SymbolBuffer for D vector
-  - ltEncode uses SymbolBuffer for intermediate symbol reads
+### What Rust does differently
 
-### Item 2: Incremental degree tracking [DONE] (columnar index deferred)
+Rust's PI solver applies symbol operations inline during elimination rather than
+recording them for deferred application. This means the symbol data for the
+current pivot row and elimination targets is likely still hot in cache when the
+XOR happens.
 
-Add to SolverState:
+Our deferred OperationVector approach means ALL elimination ops are batched and
+replayed after the entire PI solve completes. By then, no symbol data is in
+cache.
 
-```
-col_index: []std.ArrayList(u32),  // col_index[c] = list of rows with a 1 in col c
-row_degree: []u16,                // row_degree[r] = number of 1s in V range for row r
-```
+### Potential approaches
 
-Maintained incrementally:
-  - On eliminateColumn(col): for each row in col_index[col], decrement row_degree[row]
-  - On xorRowRange(src, dst): update col_index entries and row_degree[dst]
-  - On swapCols(c1, c2): swap col_index[c1] and col_index[c2]
+1. **Inline symbol ops during solve** (match Rust's approach)
+   - Apply XOR/FMA immediately during eliminateColumn instead of recording
+   - Pros: symbol data is cache-hot, eliminates OperationVector overhead
+   - Cons: couples solver to symbol buffer, increases solve() complexity
+   - Expected impact: large -- eliminates the random replay entirely
 
-selectPivotRow scans row_degree[] (O(R) u16 comparisons, no popcount).
-graphSubstep reads col_index to build edges directly.
-eliminateColumn iterates col_index[col] instead of scanning all rows.
+2. **Operation reordering for locality**
+   - Sort/group operations by dst row to improve temporal locality
+   - Same dst row accessed by consecutive ops stays in L1/L2
+   - Pros: keeps deferred approach, simpler change
+   - Cons: sorting has overhead, may not help if src rows are still random
 
-### Item 3: Logical row indirection [DONE]
+3. **Software prefetching**
+   - Prefetch next operation's src/dst rows while processing current op
+   - `@prefetch(buf.get(next_src), .{ .locality = 1 })`
+   - Pros: hides latency, minimal code change
+   - Cons: limited win if access pattern is truly random (prefetch queue depth)
 
-Add to SolverState:
+4. **Cache-blocked replay**
+   - Partition operations into blocks where all referenced rows fit in L2
+   - Process each block completely before moving to next
+   - Pros: maximizes cache reuse within each block
+   - Cons: complex implementation, operations may have dependencies
 
-```
-logical_to_physical: []u32,  // logical row i maps to physical row logical_to_physical[i]
-physical_to_logical: []u32,  // inverse mapping
-```
+### Recommended approach
 
-All matrix access goes through indirection:
-  - binary.get(logical_to_physical[row], col)
-  - swapRows becomes: swap logical_to_physical entries + swap physical_to_logical entries
+Option 1 (inline symbol ops) is the highest-impact change and matches what Rust
+does. The deferred OperationVector was a design choice for separation of concerns
+but it creates the exact access pattern problem we're seeing. Inlining would let
+us leverage the solver's natural locality: during eliminateColumn, the pivot row
+and each target row are accessed in sequence, and the pivot row stays hot across
+all targets in that column.
 
-DenseBinaryMatrix methods that take row indices now receive physical indices.
-The indirection is applied at the SolverState level.
+### Phase 1 (secondary)
 
-### Item 4: Direct binary matrix construction [DONE]
+Phase 1 is 50-60% at mid-range K' (1032). The columnar index (deferred from
+Item 2) would let eliminateColumn iterate only affected rows instead of scanning
+all rows.
 
-Split buildConstraintMatrix into two functions:
+### Decode overhead (tertiary)
 
-```
-buildBinaryConstraintMatrix(allocator, k_prime) -> DenseBinaryMatrix
-buildHDPCMatrix(allocator, k_prime) -> OctetMatrix  // H rows x L cols
-```
-
-LDPC and LT rows write directly into DenseBinaryMatrix via set().
-HDPC rows write into a small H x L OctetMatrix.
-
-The full L x L OctetMatrix is never created.
-
-Changes:
-  - constraint_matrix.zig: add buildBinaryConstraintMatrix, buildHDPCMatrix
-  - pi_solver.zig: SolverState.init takes both matrices directly
-  - encoder.zig / decoder.zig: call the new construction functions
-
-### Item 5: Widen SIMD to 256-bit (AVX2)
-
-In octets.zig:
-  - addAssign: use @Vector(32, u8) when AVX2 is available
-  - fmaSlice: use @Vector(32, u8) with VPSHUFB for split-nibble multiply
-  - mulAssignScalar: same treatment
-
-Detection: check for .avx2 in builtin.cpu.features on x86_64.
-Fallback: keep existing 128-bit path for non-AVX2 targets.
-
-In gf2.zig:
-  - xorSlice / xorSliceFrom: use @Vector(4, u64) = 256-bit for u64 XOR
-  - Already benefits from auto-vectorization, but explicit vectors help
-
-Expected impact: 1.5-2x on symbol operations (smaller than other items
-because symbol ops are partly memory-bandwidth limited).
+Decode consistently ~1.3x slower than encode at same data size. Worth profiling
+the decoder separately to identify decode-specific bottlenecks.

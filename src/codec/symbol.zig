@@ -90,6 +90,23 @@ pub const SymbolBuffer = struct {
         octets.fmaSlice(self.get(dst), self.getConst(src), scalar);
     }
 
+    pub fn swap(self: SymbolBuffer, a: u32, b: u32) void {
+        const sa = self.get(a);
+        const sb = self.get(b);
+        var i: usize = 0;
+        while (i + 32 <= sa.len) : (i += 32) {
+            const va: @Vector(32, u8) = sa[i..][0..32].*;
+            const vb: @Vector(32, u8) = sb[i..][0..32].*;
+            sa[i..][0..32].* = vb;
+            sb[i..][0..32].* = va;
+        }
+        while (i < sa.len) : (i += 1) {
+            const tmp = sa[i];
+            sa[i] = sb[i];
+            sb[i] = tmp;
+        }
+    }
+
     pub fn copyFrom(self: SymbolBuffer, index: u32, src: []const u8) void {
         @memcpy(self.get(index)[0..src.len], src);
     }

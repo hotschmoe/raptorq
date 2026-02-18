@@ -20,11 +20,7 @@ pub const OperationVector = struct {
                 .add_assign => |o| buf.addAssign(o.dst, o.src),
                 .mul_assign => |o| buf.mulAssign(o.index, o.scalar),
                 .fma => |o| buf.fma(o.dst, o.src, o.scalar),
-                .reorder => |o| {
-                    const a = buf.get(o.src);
-                    const b = buf.get(o.dst);
-                    for (a, b) |*x, *y| std.mem.swap(u8, x, y);
-                },
+                .reorder => |o| buf.swap(o.src, o.dst),
             }
         }
     }

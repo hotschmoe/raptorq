@@ -18,8 +18,13 @@ pub fn xorSlice(dst: []u64, src: []const u64) void {
             dst[i..][0..4].* = d ^ s;
         }
     }
-    for (dst[i..], src[i..]) |*d, s| {
-        d.* ^= s;
+    while (i + 2 <= dst.len) : (i += 2) {
+        const s: @Vector(2, u64) = src[i..][0..2].*;
+        const d: @Vector(2, u64) = dst[i..][0..2].*;
+        dst[i..][0..2].* = d ^ s;
+    }
+    if (i < dst.len) {
+        dst[i] ^= src[i];
     }
 }
 
@@ -110,7 +115,12 @@ pub fn xorSliceFrom(dst: []u64, src: []const u64, start_col: u32) void {
             rest_dst[i..][0..4].* = d ^ s;
         }
     }
-    for (rest_dst[i..], rest_src[i..]) |*d, s| {
-        d.* ^= s;
+    while (i + 2 <= rest_dst.len) : (i += 2) {
+        const s: @Vector(2, u64) = rest_src[i..][0..2].*;
+        const d: @Vector(2, u64) = rest_dst[i..][0..2].*;
+        rest_dst[i..][0..2].* = d ^ s;
+    }
+    if (i < rest_dst.len) {
+        rest_dst[i] ^= rest_src[i];
     }
 }

@@ -83,14 +83,23 @@ fn tableLookup32(table: @Vector(16, u8), indices: @Vector(32, u8)) @Vector(32, u
 const mask_0f: @Vector(16, u8) = @splat(0x0F);
 const shift_4: @Vector(16, u3) = @splat(4);
 
-/// Apply split-nibble multiply to 16-byte chunks of dst, returning bytes processed.
-fn simdMulChunks(dst: []u8, tables: NibbleTables) usize {
+/// Apply split-nibble multiply in 2x16-byte unrolled chunks, returning bytes processed.
+fn simdMulChunks2x16(dst: []u8, tables: NibbleTables) usize {
     var i: usize = 0;
-    while (i + 16 <= dst.len) : (i += 16) {
+    while (i + 32 <= dst.len) : (i += 32) {
+        inline for ([_]usize{ 0, 16 }) |off| {
+            const d: @Vector(16, u8) = dst[i + off ..][0..16].*;
+            const lo_prod = tableLookup16(tables.lo, d & mask_0f);
+            const hi_prod = tableLookup16(tables.hi, d >> shift_4);
+            dst[i + off ..][0..16].* = lo_prod ^ hi_prod;
+        }
+    }
+    if (i + 16 <= dst.len) {
         const d: @Vector(16, u8) = dst[i..][0..16].*;
         const lo_prod = tableLookup16(tables.lo, d & mask_0f);
         const hi_prod = tableLookup16(tables.hi, d >> shift_4);
         dst[i..][0..16].* = lo_prod ^ hi_prod;
+        i += 16;
     }
     return i;
 }
@@ -122,15 +131,25 @@ fn simdFmaChunks32(dst: []u8, src: []const u8, tables: NibbleTables) usize {
     return i;
 }
 
-/// Apply split-nibble fused multiply-add to 16-byte chunks, returning bytes processed.
-fn simdFmaChunks(dst: []u8, src: []const u8, tables: NibbleTables) usize {
+/// Apply split-nibble fused multiply-add in 2x16-byte unrolled chunks, returning bytes processed.
+fn simdFmaChunks2x16(dst: []u8, src: []const u8, tables: NibbleTables) usize {
     var i: usize = 0;
-    while (i + 16 <= dst.len) : (i += 16) {
+    while (i + 32 <= dst.len) : (i += 32) {
+        inline for ([_]usize{ 0, 16 }) |off| {
+            const s: @Vector(16, u8) = src[i + off ..][0..16].*;
+            const lo_prod = tableLookup16(tables.lo, s & mask_0f);
+            const hi_prod = tableLookup16(tables.hi, s >> shift_4);
+            const d: @Vector(16, u8) = dst[i + off ..][0..16].*;
+            dst[i + off ..][0..16].* = d ^ (lo_prod ^ hi_prod);
+        }
+    }
+    if (i + 16 <= dst.len) {
         const s: @Vector(16, u8) = src[i..][0..16].*;
         const lo_prod = tableLookup16(tables.lo, s & mask_0f);
         const hi_prod = tableLookup16(tables.hi, s >> shift_4);
         const d: @Vector(16, u8) = dst[i..][0..16].*;
         dst[i..][0..16].* = d ^ (lo_prod ^ hi_prod);
+        i += 16;
     }
     return i;
 }
@@ -138,17 +157,17 @@ fn simdFmaChunks(dst: []u8, src: []const u8, tables: NibbleTables) usize {
 /// dst[i] ^= src[i] for all i
 pub fn addAssign(dst: []u8, src: []const u8) void {
     var i: usize = 0;
-    if (has_avx2) {
-        while (i + 32 <= dst.len) : (i += 32) {
-            const s: @Vector(32, u8) = src[i..][0..32].*;
-            const d: @Vector(32, u8) = dst[i..][0..32].*;
-            dst[i..][0..32].* = d ^ s;
-        }
+    // @Vector(32, u8) XOR: AVX2 emits single vpxor, SSE2 splits into 2x pxor
+    while (i + 32 <= dst.len) : (i += 32) {
+        const s: @Vector(32, u8) = src[i..][0..32].*;
+        const d: @Vector(32, u8) = dst[i..][0..32].*;
+        dst[i..][0..32].* = d ^ s;
     }
-    while (i + 16 <= dst.len) : (i += 16) {
+    if (i + 16 <= dst.len) {
         const s: @Vector(16, u8) = src[i..][0..16].*;
         const d: @Vector(16, u8) = dst[i..][0..16].*;
         dst[i..][0..16].* = d ^ s;
+        i += 16;
     }
     for (dst[i..], src[i..]) |*d, s| {
         d.* ^= s;
@@ -169,7 +188,7 @@ pub fn mulAssignScalar(dst: []u8, scalar: Octet) void {
         if (has_avx2) {
             i = simdMulChunks32(dst, tables);
         }
-        i += simdMulChunks(dst[i..], tables);
+        i += simdMulChunks2x16(dst[i..], tables);
     }
 
     const log_scalar = @as(u16, octet_tables.OCT_LOG[scalar.value]);
@@ -194,7 +213,7 @@ pub fn fmaSlice(dst: []u8, src: []const u8, scalar: Octet) void {
         if (has_avx2) {
             i = simdFmaChunks32(dst, src, tables);
         }
-        i += simdFmaChunks(dst[i..], src[i..], tables);
+        i += simdFmaChunks2x16(dst[i..], src[i..], tables);
     }
 
     const log_scalar = @as(u16, octet_tables.OCT_LOG[scalar.value]);
