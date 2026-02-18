@@ -6,6 +6,7 @@ const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
 const DenseBinaryMatrix = @import("../matrix/dense_binary_matrix.zig").DenseBinaryMatrix;
+const SparseBinaryMatrix = @import("../matrix/sparse_matrix.zig").SparseBinaryMatrix;
 const pi_solver = @import("../solver/pi_solver.zig");
 const encoder = @import("encoder.zig");
 const helpers = @import("../util/helpers.zig");
@@ -89,10 +90,15 @@ pub const SourceBlockDecoder = struct {
             count += 1;
         }
 
-        var cm = try constraint_matrix.buildDecodingMatrices(DenseBinaryMatrix, self.allocator, k_prime, isis[0..count]);
-        defer cm.deinit();
-
-        try pi_solver.solve(DenseBinaryMatrix, self.allocator, &cm, &d, k_prime);
+        if (k_prime >= pi_solver.sparse_matrix_threshold) {
+            var cm = try constraint_matrix.buildDecodingMatrices(SparseBinaryMatrix, self.allocator, k_prime, isis[0..count]);
+            defer cm.deinit();
+            try pi_solver.solve(SparseBinaryMatrix, self.allocator, &cm, &d, k_prime);
+        } else {
+            var cm = try constraint_matrix.buildDecodingMatrices(DenseBinaryMatrix, self.allocator, k_prime, isis[0..count]);
+            defer cm.deinit();
+            try pi_solver.solve(DenseBinaryMatrix, self.allocator, &cm, &d, k_prime);
+        }
 
         // Reconstruct source symbols 0..K-1 from intermediate symbols
         const result = try self.allocator.alloc(u8, @as(usize, k) * @as(usize, sym_size));

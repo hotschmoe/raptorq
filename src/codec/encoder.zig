@@ -6,6 +6,7 @@ const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
 const DenseBinaryMatrix = @import("../matrix/dense_binary_matrix.zig").DenseBinaryMatrix;
+const SparseBinaryMatrix = @import("../matrix/sparse_matrix.zig").SparseBinaryMatrix;
 const pi_solver = @import("../solver/pi_solver.zig");
 const rng = @import("../math/rng.zig");
 const octets = @import("../math/octets.zig");
@@ -99,6 +100,10 @@ pub const SourceBlockEncoder = struct {
         if (plan) |p| {
             std.debug.assert(p.l == l);
             try p.apply(&d);
+        } else if (k_prime >= pi_solver.sparse_matrix_threshold) {
+            var cm = try constraint_matrix.buildConstraintMatrices(SparseBinaryMatrix, allocator, k_prime);
+            defer cm.deinit();
+            try pi_solver.solve(SparseBinaryMatrix, allocator, &cm, &d, k_prime);
         } else {
             var cm = try constraint_matrix.buildConstraintMatrices(DenseBinaryMatrix, allocator, k_prime);
             defer cm.deinit();
@@ -177,11 +182,17 @@ pub const Encoder = struct {
         var plan_count: u8 = 0;
         defer for (plans[0..plan_count]) |*p| p.deinit();
 
-        plans[0] = try pi_solver.generatePlan(DenseBinaryMatrix, allocator, k_prime_large);
+        plans[0] = if (k_prime_large >= pi_solver.sparse_matrix_threshold)
+            try pi_solver.generatePlan(SparseBinaryMatrix, allocator, k_prime_large)
+        else
+            try pi_solver.generatePlan(DenseBinaryMatrix, allocator, k_prime_large);
         plan_count = 1;
 
         if (k_prime_small != k_prime_large) {
-            plans[1] = try pi_solver.generatePlan(DenseBinaryMatrix, allocator, k_prime_small);
+            plans[1] = if (k_prime_small >= pi_solver.sparse_matrix_threshold)
+                try pi_solver.generatePlan(SparseBinaryMatrix, allocator, k_prime_small)
+            else
+                try pi_solver.generatePlan(DenseBinaryMatrix, allocator, k_prime_small);
             plan_count = 2;
         }
 

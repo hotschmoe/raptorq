@@ -23,6 +23,8 @@ const systematic_constants = @import("../tables/systematic_constants.zig");
 
 pub const SolverError = error{ SingularMatrix, OutOfMemory };
 
+pub const sparse_matrix_threshold: u32 = 2000;
+
 pub var profile_enabled: bool = false;
 
 fn SolverState(comptime MatrixType: type) type {
@@ -610,17 +612,74 @@ fn SolverState(comptime MatrixType: type) type {
         fn phase3(self: *Self) SolverError!void {
             if (self.i <= 1) return;
 
-            var col = self.i;
-            while (col > 1) {
-                col -= 1;
-                var row: u32 = 0;
-                while (row < col) : (row += 1) {
-                    if (self.binaryGet(row, col)) {
-                        try self.binaryXorRowRange(col, row, 0);
+            // After Phase 1, V is upper-triangular in rows/cols 0..i-1.
+            // Clear bit + XOR U only (errata 11 for Phase 3).
+            const boundary = self.l - self.u;
+
+            if (comptime is_sparse) {
+                // Build column-to-row lists from sparse vecs to avoid O(i^2)
+                // iteration. Each V row has ~1 nonzero, so total entries ~= i.
+                const col_heads = self.allocator.alloc(u32, self.i) catch
+                    return error.OutOfMemory;
+                defer self.allocator.free(col_heads);
+                @memset(col_heads, std.math.maxInt(u32));
+
+                // Linked-list nodes: next[node_idx] -> next node for same col
+                // node_row[node_idx] -> the row for this entry
+                const node_cap = self.i * 4;
+                const node_next = self.allocator.alloc(u32, node_cap) catch
+                    return error.OutOfMemory;
+                defer self.allocator.free(node_next);
+                const node_row = self.allocator.alloc(u32, node_cap) catch
+                    return error.OutOfMemory;
+                defer self.allocator.free(node_row);
+                var node_count: u32 = 0;
+
+                for (0..self.i) |row_idx| {
+                    const row: u32 = @intCast(row_idx);
+                    const phys_row = self.binary.log_row_to_phys[row];
+                    const indices = self.binary.sparse_rows[phys_row].indices.items;
+                    for (indices) |phys_col| {
+                        const log_col: u32 = self.binary.phys_col_to_log[phys_col];
+                        if (log_col > row and log_col < self.i) {
+                            if (node_count >= node_cap) return error.OutOfMemory;
+                            node_next[node_count] = col_heads[log_col];
+                            node_row[node_count] = row;
+                            col_heads[log_col] = node_count;
+                            node_count += 1;
+                        }
+                    }
+                }
+
+                var col = self.i;
+                while (col > 1) {
+                    col -= 1;
+                    var node = col_heads[col];
+                    while (node != std.math.maxInt(u32)) {
+                        const row = node_row[node];
+                        self.binaryClearBit(row, col);
+                        try self.binaryXorRowRange(col, row, boundary);
                         try self.addOp(.{ .add_assign = .{
                             .src = self.d[col],
                             .dst = self.d[row],
                         } });
+                        node = node_next[node];
+                    }
+                }
+            } else {
+                var col = self.i;
+                while (col > 1) {
+                    col -= 1;
+                    var row: u32 = 0;
+                    while (row < col) : (row += 1) {
+                        if (self.binaryGet(row, col)) {
+                            self.binaryClearBit(row, col);
+                            try self.binaryXorRowRange(col, row, boundary);
+                            try self.addOp(.{ .add_assign = .{
+                                .src = self.d[col],
+                                .dst = self.d[row],
+                            } });
+                        }
                     }
                 }
             }
