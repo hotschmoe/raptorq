@@ -145,7 +145,7 @@ test "SourceBlockEncoder repair generation" {
     const data = "Test data for repair symbol generation!!";
     const sym_size: u16 = 8;
 
-    var enc = try SourceBlockEncoder.init(allocator, 0, sym_size, data);
+    var enc = try SourceBlockEncoder.init(allocator, 0, sym_size, data, null);
     defer enc.deinit();
 
     // Generate 20 repair symbols without error

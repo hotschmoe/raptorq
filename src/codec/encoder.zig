@@ -5,6 +5,7 @@ const base = @import("base.zig");
 const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
+const DenseBinaryMatrix = @import("../matrix/dense_binary_matrix.zig").DenseBinaryMatrix;
 const pi_solver = @import("../solver/pi_solver.zig");
 const rng = @import("../math/rng.zig");
 const octets = @import("../math/octets.zig");
@@ -65,6 +66,7 @@ pub const SourceBlockEncoder = struct {
         source_block_number: u8,
         symbol_size: u16,
         data: []const u8,
+        plan: ?*const pi_solver.SolverPlan,
     ) !SourceBlockEncoder {
         const t: u32 = symbol_size;
         const k: u32 = helpers.intDivCeil(@intCast(data.len), t);
@@ -94,10 +96,14 @@ pub const SourceBlockEncoder = struct {
             @memcpy(d.get(@intCast(s + h + i)), source_buf.getConst(@intCast(i)));
         }
 
-        var cm = try constraint_matrix.buildConstraintMatrices(allocator, k_prime);
-        defer cm.deinit();
-
-        try pi_solver.solve(allocator, &cm, &d, k_prime);
+        if (plan) |p| {
+            std.debug.assert(p.l == l);
+            try p.apply(&d);
+        } else {
+            var cm = try constraint_matrix.buildConstraintMatrices(DenseBinaryMatrix, allocator, k_prime);
+            defer cm.deinit();
+            try pi_solver.solve(DenseBinaryMatrix, allocator, &cm, &d, k_prime);
+        }
 
         return .{
             .source_block_number = source_block_number,
@@ -163,6 +169,22 @@ pub const Encoder = struct {
         const z: u32 = @max(1, helpers.intDivCeil(kt, 56403));
         const part = base.partition(kt, z);
 
+        // Pre-generate solver plans for unique K' values (at most 2 from partition)
+        const k_prime_large = systematic_constants.ceilKPrime(part.size_large);
+        const k_prime_small = systematic_constants.ceilKPrime(part.size_small);
+
+        var plans: [2]pi_solver.SolverPlan = undefined;
+        var plan_count: u8 = 0;
+        defer for (plans[0..plan_count]) |*p| p.deinit();
+
+        plans[0] = try pi_solver.generatePlan(DenseBinaryMatrix, allocator, k_prime_large);
+        plan_count = 1;
+
+        if (k_prime_small != k_prime_large) {
+            plans[1] = try pi_solver.generatePlan(DenseBinaryMatrix, allocator, k_prime_small);
+            plan_count = 2;
+        }
+
         const sub_encs = try allocator.alloc(SourceBlockEncoder, z * n);
         var init_count: usize = 0;
         errdefer {
@@ -177,12 +199,20 @@ pub const Encoder = struct {
             const end = @min(data_offset + block_len, data.len);
             const block_data = data[data_offset..end];
 
+            const plan_ptr: *const pi_solver.SolverPlan = if (sbn_idx < part.count_large)
+                &plans[0]
+            else if (plan_count == 2)
+                &plans[1]
+            else
+                &plans[0];
+
             if (n == 1) {
                 sub_encs[sbn_idx] = try SourceBlockEncoder.init(
                     allocator,
                     @intCast(sbn_idx),
                     symbol_size,
                     block_data,
+                    plan_ptr,
                 );
                 init_count += 1;
             } else {
@@ -208,6 +238,7 @@ pub const Encoder = struct {
                         @intCast(sbn_idx),
                         @intCast(sub_sym_size),
                         buf,
+                        plan_ptr,
                     );
                     init_count += 1;
                 }
@@ -277,7 +308,7 @@ test "SourceBlockEncoder systematic property" {
     const data = "Hello, RaptorQ!";
     const symbol_size: u16 = 4;
 
-    var enc = try SourceBlockEncoder.init(allocator, 0, symbol_size, data);
+    var enc = try SourceBlockEncoder.init(allocator, 0, symbol_size, data, null);
     defer enc.deinit();
 
     var reconstructed: [15]u8 = undefined;
@@ -298,7 +329,7 @@ test "SourceBlockEncoder generates repair symbols" {
     const data = "Test data for repair symbol generation!!";
     const symbol_size: u16 = 8;
 
-    var enc = try SourceBlockEncoder.init(allocator, 0, symbol_size, data);
+    var enc = try SourceBlockEncoder.init(allocator, 0, symbol_size, data, null);
     defer enc.deinit();
 
     var esi: u32 = enc.k;

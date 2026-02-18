@@ -5,6 +5,7 @@ const base = @import("base.zig");
 const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 const systematic_constants = @import("../tables/systematic_constants.zig");
 const constraint_matrix = @import("../matrix/constraint_matrix.zig");
+const DenseBinaryMatrix = @import("../matrix/dense_binary_matrix.zig").DenseBinaryMatrix;
 const pi_solver = @import("../solver/pi_solver.zig");
 const encoder = @import("encoder.zig");
 const helpers = @import("../util/helpers.zig");
@@ -88,10 +89,10 @@ pub const SourceBlockDecoder = struct {
             count += 1;
         }
 
-        var cm = try constraint_matrix.buildDecodingMatrices(self.allocator, k_prime, isis[0..count]);
+        var cm = try constraint_matrix.buildDecodingMatrices(DenseBinaryMatrix, self.allocator, k_prime, isis[0..count]);
         defer cm.deinit();
 
-        try pi_solver.solve(self.allocator, &cm, &d, k_prime);
+        try pi_solver.solve(DenseBinaryMatrix, self.allocator, &cm, &d, k_prime);
 
         // Reconstruct source symbols 0..K-1 from intermediate symbols
         const result = try self.allocator.alloc(u8, @as(usize, k) * @as(usize, sym_size));

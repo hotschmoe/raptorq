@@ -5,6 +5,7 @@
 const std = @import("std");
 const raptorq = @import("raptorq");
 const Octet = raptorq.octet.Octet;
+const DenseBinaryMatrix = raptorq.dense_binary_matrix.DenseBinaryMatrix;
 const cm = raptorq.constraint_matrix;
 const sc = raptorq.systematic_constants;
 const helpers = raptorq.helpers;
@@ -18,7 +19,7 @@ test "Constraint matrix dimensions" {
         const h = si.h;
         const l = kp + si.s + si.h;
 
-        var matrices = try cm.buildConstraintMatrices(std.testing.allocator, kp);
+        var matrices = try cm.buildConstraintMatrices(DenseBinaryMatrix, std.testing.allocator, kp);
         defer matrices.deinit();
 
         try std.testing.expectEqual(l - h, matrices.binary.numRows());
@@ -37,7 +38,7 @@ test "LDPC sub-matrix structure" {
     const l = kp + si.s + si.h;
     const p = l - w;
 
-    var matrices = try cm.buildConstraintMatrices(std.testing.allocator, kp);
+    var matrices = try cm.buildConstraintMatrices(DenseBinaryMatrix, std.testing.allocator, kp);
     defer matrices.deinit();
 
     // S x S identity block at columns B..B+S-1
@@ -78,7 +79,7 @@ test "HDPC sub-matrix rows" {
     const h = si.h;
     const kp_s = kp + si.s;
 
-    var matrices = try cm.buildConstraintMatrices(std.testing.allocator, kp);
+    var matrices = try cm.buildConstraintMatrices(DenseBinaryMatrix, std.testing.allocator, kp);
     defer matrices.deinit();
 
     // H x H identity block at columns K'+S..K'+S+H-1
@@ -116,7 +117,7 @@ test "Identity block in constraint matrix" {
     const h = si.h;
     const l = kp + s + h;
 
-    var matrices = try cm.buildConstraintMatrices(std.testing.allocator, kp);
+    var matrices = try cm.buildConstraintMatrices(DenseBinaryMatrix, std.testing.allocator, kp);
     defer matrices.deinit();
 
     // LT rows are at binary rows [S, L-H)
@@ -134,12 +135,12 @@ test "Identity block in constraint matrix" {
 test "Constraint matrix for K'=10" {
     const kp: u32 = 10;
 
-    var encoding = try cm.buildConstraintMatrices(std.testing.allocator, kp);
+    var encoding = try cm.buildConstraintMatrices(DenseBinaryMatrix, std.testing.allocator, kp);
     defer encoding.deinit();
 
     var isis: [10]u32 = undefined;
     for (&isis, 0..) |*v, i| v.* = @intCast(i);
-    var decoding = try cm.buildDecodingMatrices(std.testing.allocator, kp, &isis);
+    var decoding = try cm.buildDecodingMatrices(DenseBinaryMatrix, std.testing.allocator, kp, &isis);
     defer decoding.deinit();
 
     const l = encoding.l;
@@ -172,7 +173,7 @@ test "Constraint matrix for K'=100" {
     const h = si.h;
     const l = kp + s + h;
 
-    var matrices = try cm.buildConstraintMatrices(std.testing.allocator, kp);
+    var matrices = try cm.buildConstraintMatrices(DenseBinaryMatrix, std.testing.allocator, kp);
     defer matrices.deinit();
 
     try std.testing.expectEqual(l - h, matrices.binary.numRows());
