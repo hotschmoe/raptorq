@@ -45,7 +45,7 @@ src/
     constraint_matrix.zig           Layer 3 - RFC 5.3.3 construction
   solver/
     pi_solver.zig                   Layer 4 - 5-phase inactivation decoding
-    graph.zig                       Layer 4 - Connected components
+    graph.zig                       Layer 4 - Union-find connected components
   util/
     sparse_vec.zig                  Utility - Sparse binary vector
     arraymap.zig                    Utility - Specialized map types
@@ -56,6 +56,8 @@ src/
 
 - encoder.zig -> pi_solver.zig -> constraint_matrix.zig -> octet_matrix.zig -> octet.zig -> octet_tables.zig
 - decoder.zig -> pi_solver.zig (same chain)
+- pi_solver.zig -> dense_binary_matrix.zig -> gf2.zig (bit-packed binary rows)
+- pi_solver.zig -> graph.zig (union-find connected components)
 - constraint_matrix.zig -> rng.zig -> rng_tables.zig
 - constraint_matrix.zig -> systematic_constants.zig
 - sparse_matrix.zig -> sparse_vec.zig

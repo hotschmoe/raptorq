@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Octet = @import("../math/octet.zig").Octet;
-const Symbol = @import("symbol.zig").Symbol;
+const SymbolBuffer = @import("symbol.zig").SymbolBuffer;
 
 pub const SymbolOp = union(enum) {
     add_assign: struct { src: u32, dst: u32 },
@@ -14,13 +14,13 @@ pub const SymbolOp = union(enum) {
 pub const OperationVector = struct {
     ops: []const SymbolOp,
 
-    pub fn apply(self: OperationVector, symbols: []Symbol) void {
+    pub fn applyBuf(self: OperationVector, buf: *SymbolBuffer) void {
         for (self.ops) |op| {
             switch (op) {
-                .add_assign => |o| symbols[o.dst].addAssign(symbols[o.src]),
-                .mul_assign => |o| symbols[o.index].mulAssign(o.scalar),
-                .fma => |o| symbols[o.dst].fma(symbols[o.src], o.scalar),
-                .reorder => |o| std.mem.swap(Symbol, &symbols[o.src], &symbols[o.dst]),
+                .add_assign => |o| buf.addAssign(o.dst, o.src),
+                .mul_assign => |o| buf.mulAssign(o.index, o.scalar),
+                .fma => |o| buf.fma(o.dst, o.src, o.scalar),
+                .reorder => |o| buf.swap(o.src, o.dst),
             }
         }
     }

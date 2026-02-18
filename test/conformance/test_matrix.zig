@@ -163,7 +163,7 @@ test "SparseBinaryMatrix consistency with DenseBinaryMatrix" {
     // Same operations on sparse and dense matrices should produce identical results
     var dense = try DenseBinaryMatrix.init(std.testing.allocator, 4, 20);
     defer dense.deinit();
-    var sparse = try SparseBinaryMatrix.init(std.testing.allocator, 4, 20);
+    var sparse = try SparseBinaryMatrix.init(std.testing.allocator, 4, 20, 0);
     defer sparse.deinit();
 
     // Set same pattern
@@ -193,9 +193,9 @@ test "SparseBinaryMatrix consistency with DenseBinaryMatrix" {
         }
     }
 
-    // XOR row on both
+    // XOR full row on both
     dense.xorRow(0, 1);
-    try sparse.xorRow(0, 1);
+    try sparse.xorRowRange(0, 1, 0);
     r = 0;
     while (r < 4) : (r += 1) {
         var c: u32 = 0;
@@ -205,8 +205,8 @@ test "SparseBinaryMatrix consistency with DenseBinaryMatrix" {
     }
 }
 
-test "SparseBinaryMatrix to dense conversion" {
-    var sparse = try SparseBinaryMatrix.init(std.testing.allocator, 3, 30);
+test "SparseBinaryMatrix get/set and countOnesInRange" {
+    var sparse = try SparseBinaryMatrix.init(std.testing.allocator, 3, 30, 0);
     defer sparse.deinit();
 
     try sparse.set(0, 5, true);
@@ -214,21 +214,16 @@ test "SparseBinaryMatrix to dense conversion" {
     try sparse.set(1, 0, true);
     try sparse.set(2, 29, true);
 
-    var dense = try sparse.toDense();
-    defer dense.deinit();
+    try std.testing.expect(sparse.get(0, 5));
+    try std.testing.expect(sparse.get(0, 25));
+    try std.testing.expect(sparse.get(1, 0));
+    try std.testing.expect(sparse.get(2, 29));
 
-    try std.testing.expect(dense.get(0, 5));
-    try std.testing.expect(dense.get(0, 25));
-    try std.testing.expect(dense.get(1, 0));
-    try std.testing.expect(dense.get(2, 29));
+    try std.testing.expect(!sparse.get(0, 0));
+    try std.testing.expect(!sparse.get(1, 5));
+    try std.testing.expect(!sparse.get(2, 0));
 
-    // Check a few zeros
-    try std.testing.expect(!dense.get(0, 0));
-    try std.testing.expect(!dense.get(1, 5));
-    try std.testing.expect(!dense.get(2, 0));
-
-    // Row density
-    try std.testing.expectEqual(@as(u32, 2), sparse.rowDensity(0));
-    try std.testing.expectEqual(@as(u32, 1), sparse.rowDensity(1));
-    try std.testing.expectEqual(@as(u32, 1), sparse.rowDensity(2));
+    try std.testing.expectEqual(@as(u32, 2), sparse.countOnesInRange(0, 0, 30));
+    try std.testing.expectEqual(@as(u32, 1), sparse.countOnesInRange(1, 0, 30));
+    try std.testing.expectEqual(@as(u32, 1), sparse.countOnesInRange(2, 0, 30));
 }

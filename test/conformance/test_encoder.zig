@@ -145,26 +145,26 @@ test "SourceBlockEncoder repair generation" {
     const data = "Test data for repair symbol generation!!";
     const sym_size: u16 = 8;
 
-    var enc = try SourceBlockEncoder.init(allocator, 0, sym_size, data);
+    var enc = try SourceBlockEncoder.init(allocator, 0, sym_size, data, null);
     defer enc.deinit();
 
     // Generate 20 repair symbols without error
     var esi: u32 = enc.k;
     while (esi < enc.k + 20) : (esi += 1) {
-        var sym = try enc.encodeSymbol(esi);
-        defer sym.deinit();
-        try std.testing.expectEqual(@as(usize, sym_size), sym.data.len);
+        const sym = try enc.encodeSymbol(esi);
+        defer allocator.free(sym);
+        try std.testing.expectEqual(@as(usize, sym_size), sym.len);
     }
 
     // Repair symbols should not all be identical (statistical check)
-    var first_repair = try enc.encodeSymbol(enc.k);
-    defer first_repair.deinit();
+    const first_repair = try enc.encodeSymbol(enc.k);
+    defer allocator.free(first_repair);
     var found_different = false;
     esi = enc.k + 1;
     while (esi < enc.k + 10) : (esi += 1) {
-        var other = try enc.encodeSymbol(esi);
-        defer other.deinit();
-        if (!std.mem.eql(u8, first_repair.data, other.data)) {
+        const other = try enc.encodeSymbol(esi);
+        defer allocator.free(other);
+        if (!std.mem.eql(u8, first_repair, other)) {
             found_different = true;
             break;
         }

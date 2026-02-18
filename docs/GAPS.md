@@ -15,7 +15,9 @@ Last audited: 2026-02-16
 
 ### G-02: SIMD vectorization for bulk GF(256) operations
 - **Description**: Scalar GF(256) operations in math/octets.zig. Not an RFC conformance
-  gap -- reclassified as a performance optimization. Tracked in STATUS.md roadmap.
+  gap -- reclassified as a performance optimization.
+- **Resolution**: Split-nibble GF(256) multiplication via TBL (aarch64) / PSHUFB (x86_64)
+  with scalar fallback. Implemented in math/octets.zig. (2026-02-17)
 
 ### G-03: Sparse matrix utilization in solver pipeline
 - **Description**: SparseBinaryMatrix exists but unused in constraint matrix / PI solver.

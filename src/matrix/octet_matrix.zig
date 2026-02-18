@@ -39,12 +39,12 @@ pub const OctetMatrix = struct {
         return @as(usize, row) * @as(usize, self.cols) + @as(usize, col);
     }
 
-    fn rowSlice(self: OctetMatrix, row: u32) []u8 {
+    pub fn rowSlice(self: OctetMatrix, row: u32) []u8 {
         const off = @as(usize, row) * @as(usize, self.cols);
         return self.data[off..][0..self.cols];
     }
 
-    fn rowSliceConst(self: OctetMatrix, row: u32) []const u8 {
+    pub fn rowSliceConst(self: OctetMatrix, row: u32) []const u8 {
         const off = @as(usize, row) * @as(usize, self.cols);
         return self.data[off..][0..self.cols];
     }
